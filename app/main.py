@@ -15,8 +15,9 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -57,10 +58,44 @@ def authenticate(credentials: Annotated[HTTPBasicCredentials, Depends(security)]
     return credentials.username
 
 
+# Стоп-список учётных данных-заглушек: типовые дефолты, которые нельзя
+# случайно оставить на публично доступном стенде. Проверяются отдельно
+# логин и пароль — попадание любого из них в список считается заглушкой.
+_STUB_CREDENTIAL_VALUES = {
+    "", "admin", "spa", "password", "root", "test", "changeme", "12345678",
+}
+
+
+def basic_auth_is_stub(user: str, password: str) -> bool:
+    """True, если логин или пароль похожи на значение по умолчанию
+    (admin, spa, пустая строка и т. п.) и непригодны для публичного стенда."""
+    return (
+        user.strip().lower() in _STUB_CREDENTIAL_VALUES
+        or password.strip().lower() in _STUB_CREDENTIAL_VALUES
+    )
+
+
+def _enforce_auth_strength() -> None:
+    """При SPA_REQUIRE_STRONG_AUTH=true запрещает старт приложения с
+    учётными данными-заглушками, чтобы стенд нельзя было случайно
+    опубликовать без пароля. По умолчанию режим выключен."""
+    if not settings.REQUIRE_STRONG_AUTH:
+        return
+    if basic_auth_is_stub(settings.BASIC_AUTH_USER, settings.BASIC_AUTH_PASSWORD):
+        raise RuntimeError(
+            "SPA_REQUIRE_STRONG_AUTH=true, но SPA_BASIC_AUTH_USER/"
+            "SPA_BASIC_AUTH_PASSWORD похожи на учётные данные-заглушки "
+            "(admin, spa, пустое значение и т. п.). Задайте нетривиальные "
+            "логин и пароль перед публикацией стенда."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Инициализация подсистем при старте приложения и корректное
     освобождение ресурсов при остановке."""
+    _enforce_auth_strength()
+
     db = create_database()
 
     # Синхронизация справочника агрегатов (категории, годы установки).
@@ -137,6 +172,18 @@ async def lifespan(app: FastAPI):
         log.info("Приложение СПА остановлено.")
 
 
+# Доступ ко всему приложению закрыт HTTP Basic через глобальную
+# зависимость, кроме двух явных исключений:
+#   * /health       — регистрируется в обход FastAPI-роутинга (см. ниже),
+#     поэтому глобальную зависимость не наследует;
+#   * /static/*     — StaticFiles монтируется как отдельное ASGI-приложение
+#     (app.mount), которое также не проходит через зависимости роутера
+#     FastAPI; ассеты не несут данных, а браузеру они нужны, чтобы уже
+#     закрытые страницы отрисовывались после ввода пароля.
+# Встроенные /docs, /redoc, /openapi.json по умолчанию тоже не наследуют
+# глобальную зависимость (FastAPI добавляет их через add_route в обход
+# роутера с зависимостями), поэтому здесь они отключены и заведены заново
+# как обычные @app.get-маршруты — они уже подхватывают общую защиту.
 app = FastAPI(
     title="СПА — система предиктивной аналитики",
     version="0.2.0",
@@ -146,6 +193,10 @@ app = FastAPI(
         "обработки и ML-инференса (LightGBM + CatBoost)."
     ),
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    dependencies=[Depends(authenticate)],
 )
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -185,10 +236,38 @@ class NotificationSettingsIn(BaseModel):
 # --------------------------------------------------------------- #
 # Служебные эндпоинты
 # --------------------------------------------------------------- #
-@app.get("/health", tags=["service"])
-def health() -> dict:
-    """Проверка работоспособности приложения."""
-    return {"status": "ok"}
+async def _health(request: Request) -> JSONResponse:
+    """Проверка работоспособности приложения. Регистрируется через
+    app.add_route в обход роутера FastAPI (тем же способом, каким сам
+    FastAPI по умолчанию регистрирует /docs), поэтому не наследует
+    глобальную зависимость авторизации и остаётся единственным открытым
+    маршрутом приложения, помимо /static/*."""
+    return JSONResponse({"status": "ok"})
+
+
+app.add_route("/health", _health, methods=["GET"], name="health")
+
+
+@app.get("/openapi.json", include_in_schema=False, tags=["service"])
+def openapi_schema() -> JSONResponse:
+    """JSON-схема OpenAPI. Закрыта авторизацией: наследует глобальную
+    зависимость, так как зарегистрирована через @app.get, в отличие от
+    отключённого встроенного /openapi.json."""
+    return JSONResponse(app.openapi())
+
+
+@app.get("/docs", include_in_schema=False, tags=["service"])
+def swagger_ui() -> HTMLResponse:
+    """Swagger UI. Закрыта авторизацией (наследует глобальную
+    зависимость) — в отличие от встроенного /docs, доступ к которому
+    выключен."""
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} — Swagger UI")
+
+
+@app.get("/redoc", include_in_schema=False, tags=["service"])
+def redoc_ui() -> HTMLResponse:
+    """ReDoc. Закрыта авторизацией — см. swagger_ui выше."""
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} — ReDoc")
 
 
 @app.get("/info", tags=["service"])

@@ -65,10 +65,23 @@ class Settings:
     # ------------------------------------------------------------ #
     # Артефакты моделей и датасет
     # ------------------------------------------------------------ #
+    # Пакет predictive_maintenance вместе с артефактами models/ вкомпилирован
+    # в дерево репозитория, поэтому дефолт по умолчанию указывает именно
+    # туда — это то, что реально попадает в Docker-образ. Внешний каталог
+    # Модели (соседний с репозиторием на машине автора) остаётся резервным
+    # вариантом ради обратной совместимости локального запуска: если он
+    # существует, а SPA_MODELS_DIR не задана явно, используется он — как и
+    # раньше. Явно заданная SPA_MODELS_DIR всегда главнее обоих дефолтов.
+    _BUILTIN_MODELS_DIR: Path = ROOT_DIR / "predictive_maintenance" / "models"
+    _EXTERNAL_MODELS_DIR: Path = (
+        ROOT_DIR.parent / "Модели" / "predictive_maintenance" / "models"
+    )
     MODELS_DIR: Path = Path(
         os.getenv(
             "SPA_MODELS_DIR",
-            ROOT_DIR.parent / "Модели" / "predictive_maintenance" / "models",
+            _EXTERNAL_MODELS_DIR
+            if _EXTERNAL_MODELS_DIR.is_dir()
+            else _BUILTIN_MODELS_DIR,
         )
     )
     DATASET_PATH: Path = Path(
@@ -89,6 +102,11 @@ class Settings:
     API_PORT: int = int(os.getenv("SPA_API_PORT", "8000"))
     BASIC_AUTH_USER: str = os.getenv("SPA_BASIC_AUTH_USER", "admin")
     BASIC_AUTH_PASSWORD: str = os.getenv("SPA_BASIC_AUTH_PASSWORD", "admin")
+    # Строгий режим: отказ от старта с учётными данными-заглушками
+    # (admin/admin, spa, пустое значение и т. п.). По умолчанию выключен,
+    # иначе локальный запуск и автотесты с дефолтными admin/admin
+    # перестанут работать. На публичном стенде (Railway) включается явно.
+    REQUIRE_STRONG_AUTH: bool = _as_bool(os.getenv("SPA_REQUIRE_STRONG_AUTH", "false"))
 
     # ------------------------------------------------------------ #
     # Подсистема оповещений (email)

@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 pg_database.py — производственный бэкенд подсистемы хранения данных на
-базе PostgreSQL с расширением TimescaleDB.
+базе PostgreSQL, опционально с расширением TimescaleDB.
 
 Бэкенд реализует тот же программный интерфейс, что и резервный бэкенд
 SQLite (модуль app/database.py), и предназначен для замены последнего в
 производственном контуре без изменения прикладного кода подсистем.
 
-Ключевые отличия производственного бэкенда:
+Расширение TimescaleDB подключается отдельным охраняемым шагом
+инициализации (_setup_timescaledb_extension) и не является обязательным:
+на управляемом PostgreSQL без этого расширения (например, Railway HOBBY,
+где собственный образ timescale/timescaledb уходит в краш-луп по OOM)
+бэкенд деградирует до обычных таблиц PostgreSQL, не теряя работоспособность.
+Доступность расширения отражена флагом self.timescaledb_available.
+
+Ключевые отличия при доступном TimescaleDB:
 
   * таблицы временных рядов telemetry_raw, telemetry_hourly и predictions
     преобразуются в гипертаблицы TimescaleDB средствами create_hypertable,
@@ -18,6 +25,9 @@ SQLite (модуль app/database.py), и предназначен для зам
     агрегаты и предсказания — пять лет;
   * для снижения объёма хранения применяется колоночное сжатие чанков
     (add_compression_policy) с сегментацией по идентификатору оборудования.
+
+При недоступном TimescaleDB перечисленные выше шаги — no-op: логическая
+схема таблиц не меняется, гипертаблицы и политики просто не создаются.
 
 Метки времени во всех методах возвращаются в виде строк ISO 8601, что
 обеспечивает совместимость формата выдачи с резервным бэкендом SQLite.
@@ -42,10 +52,13 @@ log = logging.getLogger(__name__)
 _DEFAULT_SEVERITY = "medium"
 
 
-# Определение реляционной схемы и гипертаблиц TimescaleDB.
+# Определение реляционной схемы. Расширение TimescaleDB (если доступно)
+# подключается отдельным охраняемым шагом в _setup_timescaledb_extension —
+# логическая схема таблиц от его наличия не зависит: на обычном PostgreSQL
+# (например, managed-Postgres на Railway HOBBY, где собственный образ
+# timescale/timescaledb недоступен) telemetry_raw, telemetry_hourly и
+# predictions остаются обычными таблицами.
 SCHEMA_DDL = """
-CREATE EXTENSION IF NOT EXISTS timescaledb;
-
 CREATE TABLE IF NOT EXISTS equipment (
     machine_id TEXT PRIMARY KEY,
     machine_type TEXT NOT NULL,
@@ -154,6 +167,11 @@ class PostgresDatabase:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
         self._lock = threading.RLock()
+        # Доступность расширения TimescaleDB определяется отдельным
+        # охраняемым шагом _setup_timescaledb_extension() при инициализации
+        # схемы. По умолчанию считаем расширение недоступным — на обычном
+        # PostgreSQL это единственно верное начальное значение.
+        self.timescaledb_available = False
         self._conn = psycopg.connect(dsn, autocommit=False, row_factory=dict_row)
         self._initialize_schema()
 
@@ -162,12 +180,36 @@ class PostgresDatabase:
     # ------------------------------------------------------------ #
     def _initialize_schema(self) -> None:
         with self._lock:
+            self._setup_timescaledb_extension()
             with self._conn.cursor() as cur:
                 cur.execute(SCHEMA_DDL)
             self._conn.commit()
             self._migrate()
             self._setup_hypertables()
             self._setup_policies()
+
+    def _setup_timescaledb_extension(self) -> None:
+        """Охраняемый шаг: пытается подключить расширение TimescaleDB.
+
+        На управляемом PostgreSQL без TimescaleDB (например, Railway HOBBY)
+        команда CREATE EXTENSION завершится ошибкой доступа/отсутствия
+        расширения в системном каталоге — это ожидаемая ситуация, а не
+        авария. В этом случае схема инициализации продолжает работу на
+        обычных таблицах PostgreSQL, поэтому трейсбек в лог не пишем —
+        только короткое предупреждение.
+        """
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
+            self._conn.commit()
+            self.timescaledb_available = True
+        except psycopg.Error as exc:
+            self._conn.rollback()
+            self.timescaledb_available = False
+            log.warning(
+                "Расширение TimescaleDB недоступно — схема на обычных "
+                "таблицах PostgreSQL (%s)", exc
+            )
 
     def _migrate(self) -> None:
         """Добавляет недостающие столбцы и корректирует ограничения старых таблиц."""
@@ -216,6 +258,13 @@ class PostgresDatabase:
 
     def _setup_hypertables(self) -> None:
         """Преобразует таблицы временных рядов в гипертаблицы TimescaleDB."""
+        if not self.timescaledb_available:
+            log.info(
+                "Расширение TimescaleDB недоступно — гипертаблицы не "
+                "создаются, telemetry_raw/telemetry_hourly/predictions "
+                "остаются обычными таблицами PostgreSQL"
+            )
+            return
         statements = [
             "SELECT create_hypertable('telemetry_raw', 'ts', "
             "if_not_exists => TRUE, migrate_data => TRUE)",
@@ -236,6 +285,12 @@ class PostgresDatabase:
 
     def _setup_policies(self) -> None:
         """Регистрирует политики сжатия и ретенции TimescaleDB."""
+        if not self.timescaledb_available:
+            log.info(
+                "Расширение TimescaleDB недоступно — политики сжатия и "
+                "ретенции не регистрируются"
+            )
+            return
         raw_ret = settings.PG_RAW_RETENTION_DAYS
         agg_ret = settings.PG_AGG_RETENTION_DAYS
         raw_cmp = settings.PG_RAW_COMPRESS_AFTER_DAYS
@@ -559,7 +614,21 @@ class PostgresDatabase:
         """В производственном бэкенде ретенция выполняется фоновым
         планировщиком TimescaleDB по зарегистрированным политикам.
         Метод сохранён для совместимости интерфейса и инициирует
-        немедленный прогон заданий обслуживания."""
+        немедленный прогон заданий обслуживания.
+
+        Метод не входит в штатный путь стенда (нигде не вызывается из
+        рантайма приложения — ретенция там полагается на политики
+        TimescaleDB, зарегистрированные в _setup_policies), но вызывается
+        тем же охраняемым флагом на случай административного/ручного
+        использования: без TimescaleDB представления
+        timescaledb_information.jobs не существует, и попытка обратиться
+        к нему бессмысленна."""
+        if not self.timescaledb_available:
+            log.debug(
+                "Ручной прогон политики ретенции пропущен: "
+                "расширение TimescaleDB недоступно"
+            )
+            return
         try:
             with self.transaction() as conn, conn.cursor() as cur:
                 cur.execute("CALL run_job((SELECT job_id FROM timescaledb_information.jobs "
