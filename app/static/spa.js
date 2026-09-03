@@ -46,6 +46,16 @@
     if (v === null || v === undefined || isNaN(v)) return "—";
     return Number(v).toFixed(digits === undefined ? 1 : digits);
   };
+  // Форматирование вероятности отказа (доля 0..1) для показа с 3 знаками.
+  // Значения ниже разрешения отображения показываем как "<0.001", а не
+  // как обманчиво точный "0.000": калибратор поджимает низкий риск к
+  // маленькому, но ненулевому значению (issue #11), и ровный ноль здесь
+  // означал бы «отказ невозможен», чего модель не утверждает.
+  SPA.fmtProb = function (p) {
+    if (p === null || p === undefined || isNaN(p)) return "—";
+    if (p > 0 && p < 0.0005) return "<0.001";
+    return Number(p).toFixed(3);
+  };
   SPA.fmtTs = function (ts) {
     if (!ts) return "—";
     const d = new Date(ts);

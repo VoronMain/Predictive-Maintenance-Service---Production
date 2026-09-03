@@ -171,7 +171,7 @@
           const k = SPA.probClass(p);
           const pct = Math.max(2, Math.min(100, Math.round(p * 100)));
           return {
-            html: `<div class="bar-cell"><span class="tnum" style="min-width:42px">${p.toFixed(3)}</span>` +
+            html: `<div class="bar-cell"><span class="tnum" style="min-width:42px">${SPA.fmtProb(p)}</span>` +
                   `<span class="mini-bar is-${k}"><span style="width:${pct}%"></span></span></div>`,
             cls: "val-" + k,
           };

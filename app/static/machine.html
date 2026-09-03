@@ -601,7 +601,7 @@
       const rul  = last.remaining_useful_life_days != null ? last.remaining_useful_life_days : null;
 
       const probEl = document.getElementById("kpi-prob");
-      probEl.textContent = prob !== null ? prob.toFixed(3) : "—";
+      probEl.textContent = prob !== null ? SPA.fmtProb(prob) : "—";
       const pc = SPA.probClass(prob);
       probEl.style.color = pc === "crit" ? "var(--crit)" : pc === "warn" ? "var(--warn)" : "var(--ok)";
 

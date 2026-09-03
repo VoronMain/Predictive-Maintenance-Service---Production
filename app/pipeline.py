@@ -98,7 +98,10 @@ class Pipeline:
         )
         self.db.insert_prediction(prediction)
         log.info(
-            "Инференс по %s: p=%.3f label=%d RUL=%.1f дн.",
+            # 4 знака: калиброванная вероятность здорового оборудования
+            # лежит у нижней границы (issue #11), при 3 знаках все они
+            # писались бы в лог одинаковым p=0.000.
+            "Инференс по %s: p=%.4f label=%d RUL=%.1f дн.",
             prediction.machine_id,
             prediction.failure_probability,
             prediction.failure_label,
