@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>СПА — журнал отказов</title>
+  <link rel="icon" href="/static/logo.svg">
+  <script>(function(){try{if(localStorage.getItem('spa-theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}})();</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config={darkMode:'class',theme:{extend:{fontFamily:{sans:['Manrope','system-ui','Segoe UI','Arial','sans-serif']}}}};</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/spa.css">
+  <script src="/static/spa.js"></script>
+</head>
+<body>
+  <header id="app-header" data-active="incidents"></header>
+
+  <main class="max-w-[1400px] mx-auto px-4 sm:px-6 py-6">
+    <div class="mb-6">
+      <h1 class="h1 mb-2">Электронный журнал отказов</h1>
+      <p class="text-sm">Записи об инцидентах формируются автоматически при превышении порога классификации t* = <span id="thr">—</span>. Инцидент закрывается при возврате оборудования в нормальное состояние.</p>
+    </div>
+
+    <section class="summary-panel spa-card mb-4">
+      <div class="summary-top">
+        <div class="summary-zone zone-composition">
+          <span class="zone-label">Инциденты</span>
+          <div class="seg-bar" role="img" aria-label="Открытые и закрытые инциденты">
+            <span class="seg seg-crit" id="seg-open"></span>
+            <span class="seg seg-ok"   id="seg-closed"></span>
+          </div>
+          <div class="legend">
+            <span class="legend-item legend-total">Всего <b class="tnum" id="inc-total">—</b></span>
+            <span class="legend-item"><span class="dot dot-crit"></span>Открытых <b class="tnum" id="inc-open">—</b></span>
+            <span class="legend-item"><span class="dot dot-ok"></span>Закрытых <b class="tnum" id="inc-closed">—</b></span>
+          </div>
+        </div>
+        <div class="summary-zone zone-filters">
+          <div class="filter-row">
+            <div class="field">
+              <label for="f-status">Статус</label>
+              <select id="f-status" class="select">
+                <option value="">Все</option><option value="open">Открытые</option><option value="closed">Закрытые</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="f-type">Тип оборудования</label>
+              <input id="f-type" class="input" placeholder="напр., Hydraulic_Press">
+            </div>
+            <button class="btn btn-primary" id="apply">Применить</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Инциденты -->
+    <section class="spa-card overflow-hidden mb-6">
+      <h2 class="text-base font-bold px-4 py-3 border-b" style="border-color:var(--border)">Инциденты</h2>
+      <div class="overflow-x-auto">
+        <table class="data-table">
+          <thead><tr>
+            <th>№</th><th>Идентификатор</th><th>Тип</th><th>Открыт</th><th>Закрыт</th>
+            <th>P(откр.)</th><th>P(пик)</th><th>RUL мин., дн.</th><th>Критичность</th><th>Статус</th>
+          </tr></thead>
+          <tbody id="inc-body"><tr><td class="text-muted py-5 text-center" colspan="10">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Оповещения -->
+    <section class="spa-card overflow-hidden">
+      <h2 class="text-base font-bold px-4 py-3 border-b" style="border-color:var(--border)">Журнал оповещений</h2>
+      <div class="overflow-x-auto">
+        <table class="data-table">
+          <thead><tr>
+            <th>Время</th><th>Агрегат</th><th>Канал</th><th>Адресат</th><th>Тема</th><th>Статус</th><th>Сообщение</th>
+          </tr></thead>
+          <tbody id="alert-body"><tr><td class="text-muted py-5 text-center" colspan="7">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Модальное окно просмотра сообщения -->
+  <div id="modal-alert" class="modal-overlay hidden">
+    <div class="modal-card spa-card">
+      <div class="modal-head">
+        <h3 class="h3">Содержание оповещения</h3>
+        <button class="icon-btn" id="modal-close" type="button" aria-label="Закрыть"></button>
+      </div>
+      <div class="modal-body">
+        <div>
+          <div class="modal-field-label">Тема</div>
+          <div id="modal-subject" class="text-sm font-semibold"></div>
+        </div>
+        <div>
+          <div class="modal-field-label">Сообщение</div>
+          <div id="modal-body" class="modal-pre"></div>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <div class="modal-field-label">Адресат</div>
+            <div id="modal-recipient" class="text-sm"></div>
+          </div>
+          <div>
+            <div class="modal-field-label">Статус</div>
+            <div id="modal-status" class="text-sm"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    const CH = {
+      email: { icon: "mail",  label: "Почта" },
+      file:  { icon: "mail",  label: "Почта (файл)" },
+      smtp:  { icon: "mail",  label: "Почта" },
+      sms:   { icon: "phone", label: "SMS" },
+      push:  { icon: "push",  label: "Push" },
+    };
+    const SEV = {
+      critical: ["badge-red", "критическая"], high: ["badge-amber", "высокая"],
+      medium: ["badge-amber", "умеренная"], none: ["badge-gray", "—"],
+    };
+    const cut = (s) => {
+      if (!s) return "—";
+      const d = new Date(s);
+      if (isNaN(d)) return "—";
+      const p = (n) => String(n).padStart(2, "0");
+      return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} - ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    };
+
+    const setText = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    const setSeg = (id, p) => { const e = document.getElementById(id); if (e) { e.style.flexBasis = p + "%"; e.style.display = p > 0 ? "block" : "none"; } };
+    function skel(id, cols, rows) {
+      const b = document.getElementById(id);
+      if (!b) return;
+      const w = ["60%", "80%", "45%", "70%", "55%"];
+      b.innerHTML = Array.from({ length: rows }).map((_, r) =>
+        `<tr>${Array.from({ length: cols }).map((_, c) =>
+          `<td><span class="skeleton skeleton-line" style="width:${w[(r + c) % w.length]}"></span></td>`).join("")}</tr>`).join("");
+    }
+
+    async function loadCounters() {
+      try {
+        const s = await SPA.fetchJSON("/incidents/summary");
+        const total = s.total ?? 0, open = s.open ?? 0, closed = s.closed ?? 0;
+        setText("inc-total", total);
+        setText("inc-open", open);
+        setText("inc-closed", closed);
+        const pct = (n) => total ? (n / total * 100) : 0;
+        setSeg("seg-open", pct(open));
+        setSeg("seg-closed", pct(closed));
+      } catch (e) {}
+    }
+
+    async function loadIncidents() {
+      const p = new URLSearchParams();
+      const st = document.getElementById("f-status").value;
+      const tp = document.getElementById("f-type").value.trim();
+      if (st) p.append("status", st);
+      if (tp) p.append("machine_type", tp);
+      const body = document.getElementById("inc-body");
+      try {
+        const rows = await SPA.fetchJSON("/incidents?" + p.toString());
+        if (!rows.length) { body.innerHTML = `<tr><td class="text-muted py-5 text-center" colspan="10">Нет записей</td></tr>`; return; }
+        body.innerHTML = rows.map((i) => {
+          const open = i.status === "open";
+          const sev = SEV[i.peak_severity] || SEV.none;
+          return `<tr class="clickable" data-machine-id="${encodeURIComponent(i.machine_id)}">
+            <td class="tnum">${i.id}</td>
+            <td class="font-semibold">${i.machine_id}</td>
+            <td class="text-muted">${i.machine_type || ""}</td>
+            <td class="tnum">${cut(i.opened_at)}</td>
+            <td class="tnum">${cut(i.closed_at)}</td>
+            <td class="tnum">${i.opened_probability.toFixed(3)}</td>
+            <td class="tnum">${i.peak_probability.toFixed(3)}</td>
+            <td class="tnum">${i.min_rul_days.toFixed(1)}</td>
+            <td><span class="badge ${sev[0]}">${sev[1]}</span></td>
+            <td><span class="badge ${open ? "badge-red" : "badge-green"}"><span class="dot"></span>${open ? "открыт" : "закрыт"}</span></td>
+          </tr>`;
+        }).join("");
+      } catch (e) { body.innerHTML = `<tr><td class="text-muted py-5 text-center" colspan="10">Ошибка загрузки</td></tr>`; }
+    }
+
+    async function showAlertDetail(alertId) {
+      try {
+        const alert = await SPA.fetchJSON(`/alerts/${alertId}`);
+        document.getElementById("modal-subject").textContent = alert.subject || "—";
+        document.getElementById("modal-body").textContent = alert.body || "—";
+        document.getElementById("modal-recipient").textContent = alert.recipient || "—";
+        const sent = alert.status === "sent";
+        document.getElementById("modal-status").innerHTML =
+          `<span class="badge ${sent ? "badge-green" : "badge-red"}"><span class="dot"></span>${sent ? "доставлено" : alert.status}</span>`;
+        document.getElementById("modal-alert").classList.remove("hidden");
+      } catch (e) {
+        alert("Ошибка при загрузке деталей оповещения");
+      }
+    }
+
+    async function loadAlerts() {
+      const body = document.getElementById("alert-body");
+      try {
+        const rows = await SPA.fetchJSON("/alerts?limit=50");
+        if (!rows.length) { body.innerHTML = `<tr><td class="text-muted py-5 text-center" colspan="7">Нет записей</td></tr>`; return; }
+        body.innerHTML = rows.map((a) => {
+          const ch = CH[a.channel] || { icon: "bell", label: a.channel };
+          const sent = a.status === "sent";
+          return `<tr class="clickable" data-aid="${a.id}" title="Открыть сообщение">
+            <td class="tnum">${cut(a.sent_at)}</td>
+            <td><a href="/machine/${encodeURIComponent(a.machine_id)}" class="font-semibold">${a.machine_id}</a></td>
+            <td><span class="inline-flex items-center gap-1.5 text-muted">${SPA.icon(ch.icon)}${ch.label}</span></td>
+            <td class="text-muted">${a.recipient || "—"}</td>
+            <td class="text-muted" style="max-width:420px" title="${(a.subject || "").replace(/"/g, "&quot;")}">${a.subject || ""}</td>
+            <td><span class="badge ${sent ? "badge-green" : "badge-red"}"><span class="dot"></span>${sent ? "доставлено" : a.status}</span></td>
+            <td class="text-center"><button class="icon-btn" style="width:32px;height:32px" title="Просмотреть сообщение" aria-label="Просмотреть сообщение" onclick="event.stopPropagation();showAlertDetail(${a.id})">${SPA.icon('eye')}</button></td>
+          </tr>`;
+        }).join("");
+      } catch (e) { body.innerHTML = `<tr><td class="text-muted py-5 text-center" colspan="7">Ошибка загрузки</td></tr>`; }
+    }
+
+    function refresh() { loadCounters(); loadIncidents(); loadAlerts(); }
+
+    function closeModal() { document.getElementById("modal-alert").classList.add("hidden"); }
+
+    async function init() {
+      const cfg = await SPA.config();
+      document.getElementById("thr").textContent = cfg.threshold;
+      document.getElementById("apply").addEventListener("click", refresh);
+
+      // Модальное окно: иконка закрытия + закрытие по клику вне и по Esc.
+      const modal = document.getElementById("modal-alert");
+      const closeBtn = document.getElementById("modal-close");
+      closeBtn.innerHTML = SPA.icon("x");
+      closeBtn.addEventListener("click", closeModal);
+      modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+      document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+      // Переход в карточку оборудования по клику на строку таблицы инцидентов.
+      document.getElementById("inc-body").addEventListener("click", (e) => {
+        const tr = e.target.closest("tr[data-machine-id]");
+        if (tr) location.href = "/machine/" + tr.dataset.machineId;
+      });
+
+      // Открытие сообщения по клику на строку журнала оповещений.
+      document.getElementById("alert-body").addEventListener("click", (e) => {
+        if (e.target.closest("a") || e.target.closest("button")) return;
+        const tr = e.target.closest("tr[data-aid]");
+        if (tr) showAlertDetail(Number(tr.dataset.aid));
+      });
+
+      skel("inc-body", 10, 8);
+      skel("alert-body", 7, 8);
+      refresh();
+      setInterval(refresh, 5000);
+    }
+    init();
+  })();
+  </script>
+</body>
+</html>

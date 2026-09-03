@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ЧКПЗ: Система предиктивной аналитики</title>
+  <link rel="icon" href="/static/logo.svg">
+  <script>(function(){try{if(localStorage.getItem('spa-theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}})();</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config={darkMode:'class',theme:{extend:{fontFamily:{sans:['Manrope','system-ui','Segoe UI','Arial','sans-serif']}}}};</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/spa.css">
+  <script src="/static/spa.js"></script>
+</head>
+<body>
+  <header id="app-header" data-active="overview"></header>
+
+  <main class="max-w-[1400px] mx-auto px-4 sm:px-6 py-6">
+    <div class="mb-5">
+      <h1 class="h1 mb-1">Мониторинг кузнечно-прессового цеха</h1>
+      <p class="text-sm text-muted mt-0">Оборудование отсортировано по убыванию вероятности отказа. Данные актуальны на <strong id="freshness-ts" class="text-brand">…</strong></p>
+    </div>
+
+    <!-- Компактная полоса статистики -->
+    <div class="stats-strip spa-card mb-3">
+      <div class="stats-left">
+        <div class="stats-total-wrap">
+          <b class="tnum stats-total-val" id="cnt-total">—</b>
+          <span class="stats-total-lbl">ед.</span>
+        </div>
+        <div class="seg-bar seg-bar-sm" role="img" aria-label="Состав парка по состоянию">
+          <span class="seg seg-ok"    id="seg-normal"></span>
+          <span class="seg seg-crit"  id="seg-prefail"></span>
+          <span class="seg seg-brand" id="seg-new"></span>
+        </div>
+        <div class="stats-legend">
+          <span><span class="dot dot-ok"></span>норма <b class="tnum" id="cnt-normal">—</b></span>
+          <span><span class="dot dot-crit"></span>предав. <b class="tnum" id="cnt-prefail-leg">—</b></span>
+          <span><span class="dot dot-brand"></span>новых <b class="tnum" id="cnt-new">—</b></span>
+        </div>
+      </div>
+      <div class="stats-metrics">
+        <div class="stat-metric" id="prefail-chip">
+          <b class="tnum stat-metric-val" id="cnt-prefail">—</b>
+          <span class="stat-metric-lbl">предаварийных</span>
+        </div>
+        <div class="stat-metric">
+          <b class="tnum stat-metric-val" id="cnt-inc-open">—</b>
+          <span class="stat-metric-lbl">инц. открыто / <span class="tnum" id="cnt-inc-total">—</span></span>
+        </div>
+        <div class="stat-metric">
+          <b class="tnum stat-metric-val" id="cnt-alerts">—</b>
+          <span class="stat-metric-lbl">оповещений</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Таблица оборудования с панелью управления -->
+    <section class="spa-card overflow-hidden">
+      <div class="table-toolbar">
+        <div class="toolbar-left">
+          <h2 class="text-base font-bold" style="white-space:nowrap;flex-shrink:0">Оборудование цеха</h2>
+          <div class="toolbar-cats" id="category-cards"></div>
+        </div>
+        <div class="toolbar-right">
+          <input type="search" id="table-search" class="toolbar-search" placeholder="Поиск агрегата…" autocomplete="off">
+          <select id="group-by" class="toolbar-select">
+            <option value="">Без группировки</option>
+            <option value="category">По категории</option>
+            <option value="status">По статусу</option>
+          </select>
+          <button class="btn btn-sm" id="col-picker-btn" title="Показать/скрыть столбцы">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="1" y="2" width="4" height="12" rx="1"/><rect x="6" y="2" width="4" height="12" rx="1"/><rect x="11" y="2" width="4" height="12" rx="1"/>
+            </svg>
+            Столбцы
+          </button>
+        </div>
+      </div>
+      <div class="col-picker-panel" id="col-picker-panel" style="display:none">
+        <div id="col-picker"></div>
+      </div>
+      <div class="overflow-x-auto" style="max-height:70vh">
+        <table class="data-table">
+          <thead id="ov-head"></thead>
+          <tbody id="ov-body">
+            <tr><td class="text-muted text-center py-6" colspan="12">Загрузка данных…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  (function () {
+    // Column definitions: fixed = cannot hide, on = visible by default.
+    const COLS = [
+      { key: "machine",  label: "Оборудование", fixed: true,  on: true,  type: "machine" },
+      { key: "category", label: "Категория",    fixed: true,  on: true,  type: "category" },
+      { key: "prob",     label: "P(отказа)", title: "Вероятность отказа за 7 дней", fixed: false, on: true,  type: "prob" },
+      { key: "rul",      label: "RUL, дн.", title: "Остаточный ресурс в днях", fixed: false, on: true,  type: "rul" },
+      { key: "status",   label: "Статус",        fixed: false, on: true,  type: "status" },
+      { key: "temperature_c",       label: "Темп., °C",   fixed: false, on: true,  type: "sensor", digits: 1, unit: "" },
+      { key: "vibration_mms",       label: "Вибр., мм/с", fixed: false, on: false, type: "sensor", digits: 1 },
+      { key: "sound_db",            label: "Шум, дБ",     fixed: false, on: false, type: "sensor", digits: 0 },
+      { key: "oil_level_pct",       label: "Масло, %",    fixed: false, on: false, type: "sensor", digits: 0 },
+      { key: "coolant_level_pct",   label: "ОЖ, %",       fixed: false, on: false, type: "sensor", digits: 0 },
+      { key: "power_consumption_kw",label: "Мощн., кВт",  fixed: false, on: false, type: "sensor", digits: 0 },
+      { key: "operational_hours",   label: "Наработка, ч",fixed: false, on: false, type: "hours",  digits: 0 },
+    ];
+    const LS_KEY = "spa-ov-cols";
+    const STATUS_RANK = { pre_failure: 2, normal: 1, new: 0 };
+
+    let cfg = { threshold: 0.33, limits: {} };
+    let visible = loadVisible();
+    let sortKey = "prob", sortDir = "desc";
+    let prevVisibleSig = "";
+    let filterCategory = null;
+    let filterSearch   = "";
+    let groupByKey     = "";
+    let prevGroupByKey = "";
+    const rowEls = new Map();
+
+    function loadVisible() {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(LS_KEY)); } catch (e) {}
+      const set = new Set();
+      COLS.forEach((c) => {
+        if (c.fixed) { set.add(c.key); return; }
+        if (saved && Array.isArray(saved)) { if (saved.includes(c.key)) set.add(c.key); }
+        else if (c.on) set.add(c.key);
+      });
+      return set;
+    }
+    function saveVisible() {
+      try { localStorage.setItem(LS_KEY, JSON.stringify([...visible])); } catch (e) {}
+    }
+    function visibleCols() { return COLS.filter((c) => visible.has(c.key)); }
+
+    function statusOf(row) {
+      if (row.failure_probability === null || row.failure_probability === undefined
+          || row.operational_hours < 1000) return "new";
+      if (row.failure_probability >= cfg.threshold) return "pre_failure";
+      return "normal";
+    }
+    function statusLabel(s) {
+      if (s === "pre_failure") return "Предаварийные";
+      if (s === "new")         return "Новые";
+      return "В норме";
+    }
+    function statusBadge(row) {
+      const s = statusOf(row);
+      if (s === "pre_failure") return '<span class="badge badge-red"><span class="dot"></span>предаварийное</span>';
+      if (s === "new")         return '<span class="badge badge-blue"><span class="dot"></span>новое</span>';
+      return '<span class="badge badge-green"><span class="dot"></span>норма</span>';
+    }
+
+    // Возвращает {html, cls} для ячейки.
+    function cell(col, row) {
+      const limits = cfg.limits;
+      switch (col.type) {
+        case "machine":
+          return { html: `<a href="/machine/${encodeURIComponent(row.machine_id)}" class="font-semibold">${row.machine_id}</a>`, cls: "" };
+        case "category":
+          return { html: row.category || row.machine_type || "—", cls: "" };
+        case "prob": {
+          const p = row.failure_probability;
+          if (p === null || p === undefined) return { html: "—", cls: "" };
+          const k = SPA.probClass(p);
+          const pct = Math.max(2, Math.min(100, Math.round(p * 100)));
+          return {
+            html: `<div class="bar-cell"><span class="tnum" style="min-width:42px">${p.toFixed(3)}</span>` +
+                  `<span class="mini-bar is-${k}"><span style="width:${pct}%"></span></span></div>`,
+            cls: "val-" + k,
+          };
+        }
+        case "rul": {
+          const r = row.remaining_useful_life_days;
+          if (r === null || r === undefined) return { html: "—", cls: "" };
+          const cls = r <= 7 ? "crit" : r <= 14 ? "warn" : "ok";
+          return { html: `<span class="tnum">${r.toFixed(1)}</span>`, cls: "val-" + cls };
+        }
+        case "status":
+          return { html: statusBadge(row), cls: "" };
+        case "sensor": {
+          const v = row[col.key];
+          if (v === null || v === undefined) return { html: "—", cls: "" };
+          const k = SPA.sensorClass(col.key, v, limits);
+          const num = `<span class="tnum">${v.toFixed(col.digits)}</span>`;
+          if (k === "warn" || k === "crit") {
+            const label = k === "warn" ? "предупр." : "крит.";
+            return { html: `${num} <span class="eval-pill val-${k}" style="margin-left:5px">${label}</span>`, cls: "val-" + k };
+          }
+          return { html: num, cls: "" };
+        }
+        case "hours": {
+          const v = row.operational_hours;
+          if (v === null || v === undefined) return { html: "—", cls: "" };
+          return { html: `<span class="tnum">${Math.round(v)}</span>`, cls: "" };
+        }
+      }
+      return { html: "—", cls: "" };
+    }
+
+    function sortVal(col, row) {
+      switch (col.type) {
+        case "machine":  return row.machine_id || "";
+        case "category": return row.category || row.machine_type || "";
+        case "prob":     return num(row.failure_probability);
+        case "rul":      return num(row.remaining_useful_life_days);
+        case "status":   return STATUS_RANK[statusOf(row)];
+        case "hours":    return num(row.operational_hours);
+        case "sensor":   return num(row[col.key]);
+      }
+      return 0;
+    }
+    function num(v) { return (v === null || v === undefined || isNaN(v)) ? -Infinity : Number(v); }
+
+    function buildPicker() {
+      const box = document.getElementById("col-picker");
+      box.innerHTML = COLS.filter((c) => !c.fixed).map((c) =>
+        `<label class="col-toggle${visible.has(c.key) ? " on" : ""}">
+           <input type="checkbox" data-col="${c.key}" ${visible.has(c.key) ? "checked" : ""}>${c.label}
+         </label>`).join("");
+      box.querySelectorAll("input[data-col]").forEach((inp) => {
+        inp.addEventListener("change", () => {
+          if (inp.checked) visible.add(inp.dataset.col); else visible.delete(inp.dataset.col);
+          inp.closest(".col-toggle").classList.toggle("on", inp.checked);
+          saveVisible();
+          render(lastData);
+        });
+      });
+    }
+
+    function buildHead() {
+      const cols = visibleCols();
+      const arrow = (k) => k === sortKey ? (sortDir === "desc" ? " ▾" : " ▴") : "";
+      document.getElementById("ov-head").innerHTML =
+        "<tr>" + cols.map((c) =>
+          `<th class="sortable" data-key="${c.key}" ${c.title ? `title="${c.title}"` : ""}>${c.label}${arrow(c.key)}</th>`).join("") + "</tr>";
+      document.querySelectorAll("#ov-head th").forEach((th) => {
+        th.addEventListener("click", () => {
+          const k = th.dataset.key;
+          if (sortKey === k) sortDir = sortDir === "desc" ? "asc" : "desc";
+          else { sortKey = k; sortDir = (k === "machine" || k === "category") ? "asc" : "desc"; }
+          render(lastData);
+        });
+      });
+    }
+
+    function renderSkeleton() {
+      const cols = visibleCols();
+      buildHead();
+      const w = ["70%", "55%", "85%", "45%", "65%"];
+      document.getElementById("ov-body").innerHTML = Array.from({ length: 9 }).map((_, r) =>
+        `<tr>${cols.map((_, c) =>
+          `<td><span class="skeleton skeleton-line" style="width:${w[(r + c) % w.length]}"></span></td>`).join("")}</tr>`).join("");
+    }
+
+    let lastData = [];
+    function render(data) {
+      lastData = data || [];
+      const cols = visibleCols();
+
+      // Фильтрация
+      const q = filterSearch.trim().toLowerCase();
+      const filtered = lastData.filter((row) => {
+        if (filterCategory) {
+          const cat = row.category || row.machine_type || "";
+          if (cat !== filterCategory) return false;
+        }
+        if (q) {
+          return row.machine_id.toLowerCase().includes(q) ||
+                 (row.category  || "").toLowerCase().includes(q) ||
+                 (row.machine_type || "").toLowerCase().includes(q);
+        }
+        return true;
+      });
+
+      // Пересборка при изменении набора столбцов или режима группировки
+      const sig = cols.map((c) => c.key).join("|");
+      if (sig !== prevVisibleSig || groupByKey !== prevGroupByKey) {
+        prevVisibleSig = sig;
+        prevGroupByKey = groupByKey;
+        buildHead();
+        rowEls.clear();
+        document.getElementById("ov-body").innerHTML = "";
+      }
+      buildHead();
+
+      const body = document.getElementById("ov-body");
+
+      if (!filtered.length) {
+        body.innerHTML =
+          `<tr><td class="text-muted text-center py-6" colspan="${cols.length}">Нет данных</td></tr>`;
+        rowEls.clear();
+        return;
+      }
+
+      const sortCol = COLS.find((c) => c.key === sortKey) || COLS[2];
+      const sorted = [...filtered].sort((a, b) => {
+        const va = sortVal(sortCol, a), vb = sortVal(sortCol, b);
+        let r = (typeof va === "string") ? va.localeCompare(vb, "ru") : (va - vb);
+        return sortDir === "desc" ? -r : r;
+      });
+
+      if (groupByKey) {
+        renderGrouped(body, sorted, cols);
+      } else {
+        renderFlat(body, sorted, cols);
+      }
+    }
+
+    function renderFlat(body, sorted, cols) {
+      const seen = new Set();
+      let revealIdx = 0;
+      sorted.forEach((row) => {
+        seen.add(row.machine_id);
+        let tr = rowEls.get(row.machine_id);
+        if (!tr) {
+          tr = document.createElement("tr");
+          tr.className = "clickable row-in";
+          tr.style.animationDelay = Math.min(revealIdx++ * 28, 480) + "ms";
+          tr.addEventListener("animationend", () => {
+            tr.classList.remove("row-in");
+            tr.style.animationDelay = "";
+          }, { once: true });
+          tr.addEventListener("click", (e) => {
+            if (e.target.closest("a")) return;
+            location.href = "/machine/" + encodeURIComponent(row.machine_id);
+          });
+          rowEls.set(row.machine_id, tr);
+        }
+        tr.innerHTML = cols.map((c) => {
+          const { html, cls } = cell(c, row);
+          return `<td class="${cls}">${html}</td>`;
+        }).join("");
+        const p = row.failure_probability;
+        tr.classList.remove("row-warn", "row-crit");
+        if (p >= 0.75) tr.classList.add("row-crit");
+        else if (p >= 0.5) tr.classList.add("row-warn");
+        body.appendChild(tr);
+      });
+      for (const [id, tr] of rowEls) {
+        if (!seen.has(id)) { tr.remove(); rowEls.delete(id); }
+      }
+    }
+
+    function renderGrouped(body, sorted, cols) {
+      body.innerHTML = "";
+      rowEls.clear();
+      const groups = new Map();
+      sorted.forEach((row) => {
+        const key = groupByKey === "category"
+          ? (row.category || row.machine_type || "—")
+          : statusLabel(statusOf(row));
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(row);
+      });
+      let revealIdx = 0;
+      for (const [groupName, rows] of groups) {
+        const hdr = document.createElement("tr");
+        hdr.className = "group-hdr";
+        hdr.innerHTML = `<td colspan="${cols.length}">${groupName} — ${rows.length} ед.</td>`;
+        body.appendChild(hdr);
+        rows.forEach((row) => {
+          const tr = document.createElement("tr");
+          tr.className = "clickable row-in";
+          tr.style.animationDelay = Math.min(revealIdx++ * 22, 400) + "ms";
+          tr.addEventListener("animationend", () => {
+            tr.classList.remove("row-in");
+            tr.style.animationDelay = "";
+          }, { once: true });
+          tr.addEventListener("click", (e) => {
+            if (e.target.closest("a")) return;
+            location.href = "/machine/" + encodeURIComponent(row.machine_id);
+          });
+          tr.innerHTML = cols.map((c) => {
+            const { html, cls } = cell(c, row);
+            return `<td class="${cls}">${html}</td>`;
+          }).join("");
+          const p = row.failure_probability;
+          if (p >= 0.75) tr.classList.add("row-crit");
+          else if (p >= 0.5) tr.classList.add("row-warn");
+          body.appendChild(tr);
+        });
+      }
+    }
+
+    let statsAnimated = false;
+    function setText(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
+    // Первая отрисовка статистики — анимированный счёт; последующие обновления — мгновенно.
+    function setStat(id, v) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (!statsAnimated && typeof v === "number") SPA.countUp(el, v);
+      else el.textContent = v;
+    }
+    function setSeg(id, pct) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.style.flexBasis = pct + "%";
+      el.style.display = pct > 0 ? "block" : "none";
+    }
+
+    async function loadStats() {
+      try {
+        const s = await SPA.fetchJSON("/dashboard/stats");
+        const total   = s.total ?? 0;
+        const normal  = s.by_status?.normal ?? 0;
+        const prefail = s.by_status?.pre_failure ?? 0;
+        const fresh   = s.by_status?.new ?? 0;
+
+        setStat("cnt-total", total);
+        setText("cnt-normal", normal);
+        setText("cnt-new", fresh);
+        setStat("cnt-prefail", prefail);
+        setText("cnt-prefail-leg", prefail);
+        setStat("cnt-inc-open", s.incidents_open ?? "—");
+        setText("cnt-inc-total", s.incidents_total ?? "—");
+        setStat("cnt-alerts", s.alerts_sent ?? "—");
+
+        statsAnimated = true;
+
+        const pct = (n) => total ? (n / total * 100) : 0;
+        setSeg("seg-normal", pct(normal));
+        setSeg("seg-prefail", pct(prefail));
+        setSeg("seg-new", pct(fresh));
+
+        document.getElementById("prefail-chip").classList.toggle("critical", prefail > 0);
+
+        const cats = Object.entries(s.by_category || {});
+        const catBox = document.getElementById("category-cards");
+        catBox.innerHTML = cats.map(([cat, n]) =>
+          `<button class="cat-chip${filterCategory === cat ? " active" : ""}" data-cat="${cat}">${cat} <b class="tnum">${n}</b></button>`).join("");
+        catBox.querySelectorAll(".cat-chip[data-cat]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            filterCategory = filterCategory === btn.dataset.cat ? null : btn.dataset.cat;
+            catBox.querySelectorAll(".cat-chip[data-cat]").forEach((b) =>
+              b.classList.toggle("active", b.dataset.cat === filterCategory));
+            render(lastData);
+          });
+        });
+      } catch (e) { /* тихо */ }
+    }
+
+    async function loadTable() {
+      try {
+        const data = await SPA.fetchJSON("/predictions/overview");
+        render(data);
+        if (data && data.length > 0) {
+          const latest = data.reduce((a, b) => {
+            const ta = new Date(a.updated_at || 0).getTime();
+            const tb = new Date(b.updated_at || 0).getTime();
+            return ta > tb ? a : b;
+          });
+          const ts = latest.updated_at ? SPA.fmtTs(latest.updated_at) : "—";
+          document.getElementById("freshness-ts").textContent = ts;
+        }
+      } catch (e) {
+        document.getElementById("ov-body").innerHTML = `<tr><td class="text-muted text-center py-6" colspan="12">Ошибка загрузки данных</td></tr>`;
+      }
+    }
+
+    async function init() {
+      cfg = await SPA.config();
+      buildPicker();
+      renderSkeleton();
+
+      document.getElementById("table-search").addEventListener("input", (e) => {
+        filterSearch = e.target.value;
+        render(lastData);
+      });
+      document.getElementById("group-by").addEventListener("change", (e) => {
+        groupByKey = e.target.value;
+        render(lastData);
+      });
+      document.getElementById("col-picker-btn").addEventListener("click", () => {
+        const panel = document.getElementById("col-picker-panel");
+        const open = panel.style.display !== "none";
+        panel.style.display = open ? "none" : "flex";
+        document.getElementById("col-picker-btn").classList.toggle("active", !open);
+      });
+
+      await Promise.all([loadStats(), loadTable()]);
+      setInterval(() => { loadStats(); loadTable(); }, 5000);
+    }
+    init();
+  })();
+  </script>
+</body>
+</html>

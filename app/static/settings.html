@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>СПА — настройки оповещений</title>
+  <link rel="icon" href="/static/logo.svg">
+  <script>(function(){try{if(localStorage.getItem('spa-theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}})();</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config={darkMode:'class',theme:{extend:{fontFamily:{sans:['Manrope','system-ui','Segoe UI','Arial','sans-serif']}}}};</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/spa.css">
+  <script src="/static/spa.js"></script>
+</head>
+<body>
+  <header id="app-header" data-active="settings"></header>
+
+  <main class="max-w-[760px] mx-auto px-4 sm:px-6 py-6">
+    <div class="mb-6">
+      <h1 class="h1 mb-2">Настройки оповещений</h1>
+      <p class="text-sm">Автоматические уведомления о предаварийных состояниях оборудования для инспектора БППР.</p>
+    </div>
+
+    <form id="form" class="spa-card p-6 space-y-6">
+      <div>
+        <h2 class="h2 mb-4">Каналы доставки</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <label class="channel"><input type="checkbox" id="ch-email">
+            <span class="ch-ico" id="i-mail"></span>
+            <span><span class="ch-title">Почта</span><br><span class="ch-sub">e-mail</span></span></label>
+          <label class="channel" style="opacity:0.6;cursor:not-allowed"><input type="checkbox" id="ch-sms" disabled>
+            <span class="ch-ico" id="i-phone"></span>
+            <span><span class="ch-title">SMS</span><br><span class="ch-sub">демо-режим</span></span></label>
+          <label class="channel" style="opacity:0.6;cursor:not-allowed"><input type="checkbox" id="ch-push" disabled>
+            <span class="ch-ico" id="i-push"></span>
+            <span><span class="ch-title">Push</span><br><span class="ch-sub">демо-режим</span></span></label>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="field">
+          <label for="email">Адрес электронной почты</label>
+          <input id="email" type="email" class="input" placeholder="maintenance@chkpz.ru">
+        </div>
+        <div class="field">
+          <label for="phone">Номер телефона (SMS)</label>
+          <input id="phone" type="tel" class="input" placeholder="+7 (___) ___-__-__">
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="flex items-baseline justify-between gap-3 mb-3">
+          <label for="thr" class="!mb-0">Порог вероятности отказа для оповещения</label>
+          <span class="thr-readout">
+            <span class="thr-num" id="thr-val">0.33</span>
+            <span class="thr-zone z-bal" id="thr-zone">сбалансировано</span>
+          </span>
+        </div>
+        <div class="thr-slider">
+          <div class="thr-zones" aria-hidden="true">
+            <span class="z z-sens"></span><span class="z z-bal"></span><span class="z z-strict"></span>
+          </div>
+          <input id="thr" class="thr-range" type="range" min="0.1" max="0.95" step="0.01"
+                 aria-label="Порог вероятности отказа">
+        </div>
+        <div class="thr-zonelabels" aria-hidden="true">
+          <span id="lbl-sens">Чувствительно</span>
+          <span id="lbl-bal">Сбалансировано</span>
+          <span id="lbl-strict">Строго</span>
+        </div>
+        <p class="hint mt-3">Чем ниже порог, тем раньше формируется оповещение, но выше доля ложных срабатываний. Уведомления отправляются при вероятности отказа не ниже выбранного значения.</p>
+      </div>
+
+      <div class="flex items-center gap-3 pt-2">
+        <button type="submit" class="btn btn-primary" id="save">Сохранить</button>
+        <span class="text-muted text-sm" id="saved-at"></span>
+      </div>
+
+      <p class="hint border-t pt-4" style="border-color:var(--border)">
+        Каналы SMS и Push работают в демонстрационном режиме: факт доставки фиксируется в
+        <a href="/incidents-ui">журнале оповещений</a>. Интеграция с внешними SMS- и push-шлюзами выходит за рамки демонстрационного стенда.
+      </p>
+    </form>
+  </main>
+
+  <script>
+  (function () {
+    document.getElementById("i-mail").innerHTML = SPA.icon("mail");
+    document.getElementById("i-phone").innerHTML = SPA.icon("phone");
+    document.getElementById("i-push").innerHTML = SPA.icon("push");
+
+    const el = (id) => document.getElementById(id);
+    const thr = el("thr"), thrVal = el("thr-val"), thrZone = el("thr-zone");
+    // Зоны порога: чувствительно (<0.33), сбалансировано (0.33–0.5), строго (≥0.5).
+    function zoneOf(v) {
+      if (v < 0.33) return { key: "sens", label: "чувствительно" };
+      if (v < 0.5)  return { key: "bal",  label: "сбалансировано" };
+      return { key: "strict", label: "строго" };
+    }
+    function syncThr() {
+      const v = Number(thr.value);
+      thrVal.textContent = v.toFixed(2);
+      const z = zoneOf(v);
+      thrZone.textContent = z.label;
+      thrZone.className = "thr-zone z-" + z.key;
+      el("lbl-sens").className   = z.key === "sens"   ? "on-sens"   : "";
+      el("lbl-bal").className    = z.key === "bal"    ? "on-bal"    : "";
+      el("lbl-strict").className = z.key === "strict" ? "on-strict" : "";
+    }
+    thr.addEventListener("input", syncThr);
+
+    async function load() {
+      try {
+        const s = await SPA.fetchJSON("/settings/notifications");
+        el("ch-email").checked = !!s.email_enabled;
+        el("ch-sms").checked = !!s.sms_enabled;
+        el("ch-push").checked = !!s.push_enabled;
+        el("email").value = s.email || "";
+        el("phone").value = s.phone || "";
+        thr.value = s.failure_threshold ?? 0.33;
+        syncThr();
+        if (s.updated_at) el("saved-at").textContent = "Сохранено: " + SPA.fmtTs(s.updated_at);
+      } catch (e) { SPA.toast("Не удалось загрузить настройки", true); }
+    }
+
+    el("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = el("save");
+      btn.disabled = true;
+      try {
+        const payload = {
+          email_enabled: el("ch-email").checked,
+          sms_enabled: el("ch-sms").checked,
+          push_enabled: el("ch-push").checked,
+          email: el("email").value.trim(),
+          phone: el("phone").value.trim(),
+          failure_threshold: Number(thr.value),
+        };
+        const r = await fetch("/settings/notifications", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const s = await r.json();
+        if (s.updated_at) el("saved-at").textContent = "Сохранено: " + SPA.fmtTs(s.updated_at);
+        SPA.toast("Настройки сохранены");
+      } catch (err) { SPA.toast("Ошибка сохранения", true); }
+      finally { btn.disabled = false; }
+    });
+
+    syncThr();
+    load();
+  })();
+  </script>
+</body>
+</html>

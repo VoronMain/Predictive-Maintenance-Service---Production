@@ -1,0 +1,65 @@
+{
+  "version": "1.0.0",
+  "model_name": "Predictive Maintenance Bundle",
+  "created_at": "2026-06-08",
+  "n_features": 67,
+  "classification": {
+    "algorithm": "LightGBM",
+    "calibration": "IsotonicRegression",
+    "threshold_search": "F1-maximization, step=0.01",
+    "optimal_threshold": 0.33,
+    "scale_pos_weight": 15.649,
+    "best_iteration": 19,
+    "lightgbm_tuned": {
+      "threshold": 0.33,
+      "f1": 0.7147173704768222,
+      "precision": 0.6411476927145313,
+      "recall": 0.8073593073593074,
+      "roc_auc": 0.9825283039477563,
+      "pr_auc": 0.7274781510019672,
+      "confusion_matrix": [
+        [
+          91280,
+          2714
+        ],
+        [
+          1157,
+          4849
+        ]
+      ]
+    },
+    "lightgbm_default_t05": {
+      "threshold": 0.5,
+      "f1": 0.650593402485749,
+      "precision": 0.7414270500532482,
+      "recall": 0.5795870795870796,
+      "roc_auc": 0.9825283039477563,
+      "pr_auc": 0.7274781510019672,
+      "confusion_matrix": [
+        [
+          92780,
+          1214
+        ],
+        [
+          2525,
+          3481
+        ]
+      ]
+    }
+  },
+  "regression": {
+    "algorithm": "CatBoost",
+    "nan_mode": "Min",
+    "loss_function": "RMSE",
+    "best_iteration": 212,
+    "mae": 38.12260413300405,
+    "rmse": 48.34898285833196,
+    "r2": 0.971916353001289,
+    "mape_percent": 21.184289468414573,
+    "critical_segment": {
+      "n": 6006,
+      "mae": 22.069297418636804,
+      "rmse": 30.91181060063954
+    }
+  }
+}

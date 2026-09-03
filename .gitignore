@@ -1,0 +1,41 @@
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Локальные данные рантайма (БД, письма оповещений, логи)
+data/
+*.db
+*.sqlite3
+server.log
+*.log
+
+# Секреты и локальная конфигурация
+.env
+.env.local
+
+# Черновики и рабочие материалы агента
+.scratch/
+.claude/
+.agents/
+.impeccable/
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Датасет и тяжёлые артефакты обучения (в рантайме не нужны)
+*.parquet
+*.csv
+!app/**/*.csv
+predictive_maintenance/models/balanced_random_forest.joblib

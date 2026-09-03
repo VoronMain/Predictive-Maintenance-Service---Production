@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>СПА: оборудование</title>
+  <link rel="icon" href="/static/logo.svg">
+  <script>(function(){try{if(localStorage.getItem('spa-theme')==='dark')document.documentElement.classList.add('dark');}catch(e){}})();</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config={darkMode:'class',theme:{extend:{fontFamily:{sans:['Manrope','system-ui','Segoe UI','Arial','sans-serif']}}}};</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/spa.css">
+  <script src="/static/spa.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Объединённый верхний блок ───────────────────────────────────────── */
+    .machine-top { display: flex; align-items: stretch; overflow: hidden; }
+    .hero-panel {
+      display: flex; flex-direction: column; align-items: center; gap: 20px;
+      padding: 28px 32px; flex-shrink: 0;
+      border-right: 1px solid var(--border);
+    }
+    .sensor-panel { flex: 1 1 0; padding: 18px 22px; overflow-x: auto; min-width: 0; }
+    .sensor-panel-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 12px; flex-wrap: wrap;
+    }
+
+    /* ── Кнопки периода ──────────────────────────────────────────────────── */
+    .period-group {
+      display: inline-flex; border-radius: 7px; overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .period-btn {
+      padding: 4px 10px; font-size: 12px; font-weight: 700; line-height: 1.5;
+      border: none; border-right: 1px solid var(--border);
+      background: var(--surface-2); color: var(--muted); cursor: pointer;
+      transition: background-color .12s ease, color .12s ease;
+    }
+    .period-btn:last-child { border-right: none; }
+    .period-btn.active { background: var(--brand); color: #fff; }
+    .period-btn:hover:not(.active) { background: var(--surface); color: var(--text); }
+
+    /* ── Тоггл-кнопки настроек графика ──────────────────────────────────── */
+    .chart-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer;
+      padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border);
+      background: var(--surface-2); user-select: none; transition: all .12s ease;
+      white-space: nowrap;
+    }
+    .chart-toggle input[type=checkbox] {
+      accent-color: var(--brand-strong); width: 13px; height: 13px;
+      cursor: pointer; margin: 0; flex-shrink: 0;
+    }
+    .chart-toggle:hover { color: var(--text); border-color: var(--muted); }
+    .chart-toggle:has(input:checked) {
+      color: var(--brand-strong); border-color: var(--brand);
+      background: color-mix(in srgb, var(--brand) 8%, var(--surface));
+    }
+
+    /* ── Кнопка разворота ────────────────────────────────────────────────── */
+    .expand-btn {
+      width: 28px; height: 28px; padding: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 6px; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--muted);
+      cursor: pointer; transition: all .12s ease; flex-shrink: 0;
+    }
+    .expand-btn:hover { color: var(--brand-strong); border-color: var(--brand); background: var(--surface); }
+
+    /* ── Шапка карточки графика ──────────────────────────────────────────── */
+    .chart-card-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 12px; padding: 16px 20px 8px; flex-wrap: wrap;
+    }
+    .chart-card-title-block { display: flex; flex-direction: column; gap: 8px; }
+    .chart-card-title { font-size: 16px; font-weight: 700; line-height: 1.3; }
+    .chart-card-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .chart-body { padding: 4px 16px 16px; }
+
+    /* ── Карточка датчика (компактная) ──────────────────────────────────── */
+    .sensor-card-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 14px 0; gap: 8px;
+    }
+    .sensor-card-title { font-size: 13px; font-weight: 700; }
+    .sensor-body { padding: 8px 12px 12px; }
+
+    /* ── Модальное окно графика ──────────────────────────────────────────── */
+    .modal-card-wide { width: 100%; max-width: 1350px; max-height: 85vh; overflow: auto; }
+    .modal-controls-bar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 10px 22px; border-bottom: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+    .modal-chart-body { padding: 20px 22px; min-height: 65vh;}
+
+    /* ── Адаптивность ────────────────────────────────────────────────────── */
+    /* ── Увеличенный гейдж + факты снизу ───────────────────────────────────── */
+    .hero-panel .gauge-wrap { width: 200px; height: 200px; }
+    .hero-panel .gauge-value { font-size: 34px; }
+    .hero-panel .gauge-label { font-size: 11px; }
+    .hero-panel .hero-facts {
+      display: flex; flex-wrap: wrap; justify-content: center;
+      gap: 12px 28px; flex: unset; width: 100%; max-width: 340px;
+    }
+    .hero-panel .hero-fact { flex: 1 1 120px; align-items: center; text-align: center; }
+    .hero-panel .hero-fact-label { font-size: 11px; }
+    .hero-panel .hero-fact-value { font-size: 19px; }
+
+    @media (max-width: 960px) {
+      .machine-top { flex-direction: column; }
+      .hero-panel { border-right: none; border-bottom: 1px solid var(--border); width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header id="app-header" data-active="overview"></header>
+
+  <main class="max-w-[1400px] mx-auto px-4 sm:px-6 py-6">
+    <a href="/" class="text-sm text-muted inline-flex items-center gap-1 mb-4">← к мониторингу цеха</a>
+
+    <div class="mb-6">
+      <h1 class="h1 mb-1" id="m-title">—</h1>
+      <p class="text-sm text-muted mt-0" id="m-meta">—</p>
+    </div>
+
+    <!-- Объединённый блок: гейдж + таблица датчиков -->
+    <section class="spa-card mb-4 overflow-hidden">
+      <div class="machine-top">
+        <!-- Левая панель: радиальный гейдж + KPI -->
+        <div class="hero-panel">
+          <div class="gauge-wrap">
+            <svg viewBox="0 0 120 120" role="img" aria-label="Вероятность отказа за 7 суток">
+              <circle class="gauge-track" cx="60" cy="60" r="52"/>
+              <circle class="gauge-arc" id="gauge-arc" cx="60" cy="60" r="52" stroke-dasharray="0 327"/>
+            </svg>
+            <div class="gauge-center">
+              <span class="gauge-value tnum" id="kpi-prob">—</span>
+              <span class="gauge-label">P(отказа), 7 сут.</span>
+            </div>
+          </div>
+          <div class="hero-facts" style="min-width:200px">
+            <div class="hero-fact">
+              <span class="hero-fact-label">Статус</span>
+              <span id="kpi-status">—</span>
+            </div>
+            <div class="hero-fact">
+              <span class="hero-fact-label">Остаточный ресурс</span>
+              <span class="hero-fact-value tnum">
+                <span id="kpi-rul">—</span>
+                <span class="hero-fact-unit">сут.</span>
+              </span>
+            </div>
+            <div class="hero-fact">
+              <span class="hero-fact-label">Порог классификации t*</span>
+              <span class="hero-fact-value tnum" id="hero-thr">—</span>
+            </div>
+            <div class="hero-fact">
+              <span class="hero-fact-label">Обновлено</span>
+              <span class="hero-fact-value" id="kpi-ts" style="font-size:14px;font-weight:700">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Правая панель: средние значения датчиков -->
+        <div class="sensor-panel">
+          <div class="sensor-panel-head">
+            <h3 class="h3" style="margin:0">Средние значения датчиков</h3>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-muted">за</span>
+              <div class="period-group" id="avg-period-group">
+                <button class="period-btn" data-days="1">1д</button>
+                <button class="period-btn" data-days="3">3д</button>
+                <button class="period-btn active" data-days="7">7д</button>
+                <button class="period-btn" data-days="14">14д</button>
+              </div>
+            </div>
+          </div>
+          <div style="overflow-x:auto">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Датчик</th>
+                  <th>Среднее</th>
+                  <th>Диапазон нормы</th>
+                  <th style="min-width:120px">Положение</th>
+                  <th>Оценка</th>
+                </tr>
+              </thead>
+              <tbody id="sensor-avg-body">
+                <tr><td colspan="5" class="py-4"><span class="skeleton skeleton-line" style="width:55%"></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Графики прогноза (2 колонки) -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+      <!-- Вероятность отказа -->
+      <section class="spa-card">
+        <div class="chart-card-head">
+          <div class="chart-card-title-block">
+            <span class="chart-card-title">Вероятность отказа, динамика</span>
+            <div class="period-group" id="proba-period-group">
+              <button class="period-btn" data-days="1">1д</button>
+              <button class="period-btn" data-days="3">3д</button>
+              <button class="period-btn active" data-days="7">7д</button>
+              <button class="period-btn" data-days="14">14д</button>
+              <button class="period-btn" data-days="30">30д</button>
+            </div>
+          </div>
+          <div class="chart-card-controls">
+            <label class="chart-toggle" title="Показать/скрыть порог t*">
+              <input type="checkbox" id="proba-bounds" checked> Граница
+            </label>
+            <label class="chart-toggle" title="Скользящее среднее (тренд)">
+              <input type="checkbox" id="proba-smooth"> Тренд
+            </label>
+            <button class="expand-btn" data-expand="proba" title="Развернуть график">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="chart-body">
+          <canvas id="c-proba" style="max-height:480px" role="img" aria-label="График вероятности отказа"></canvas>
+        </div>
+      </section>
+
+      <!-- Остаточный ресурс -->
+      <section class="spa-card">
+        <div class="chart-card-head">
+          <div class="chart-card-title-block">
+            <span class="chart-card-title">Остаточный ресурс (RUL), дн.</span>
+            <div class="period-group" id="rul-period-group">
+              <button class="period-btn" data-days="1">1д</button>
+              <button class="period-btn" data-days="3">3д</button>
+              <button class="period-btn active" data-days="7">7д</button>
+              <button class="period-btn" data-days="14">14д</button>
+              <button class="period-btn" data-days="30">30д</button>
+            </div>
+          </div>
+          <div class="chart-card-controls">
+            <label class="chart-toggle" title="Скользящее среднее (тренд)">
+              <input type="checkbox" id="rul-smooth"> Тренд
+            </label>
+            <button class="expand-btn" data-expand="rul" title="Развернуть график">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="chart-body">
+          <canvas id="c-rul" style="max-height:480px" role="img" aria-label="График остаточного ресурса"></canvas>
+        </div>
+      </section>
+    </div>
+
+    <!-- Секция датчиков: глобальные настройки + сетка -->
+    <div class="flex items-center justify-between gap-4 mb-3 flex-wrap">
+      <h3 class="h3">Динамика датчиков</h3>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-sm text-muted">Период:</span>
+        <div class="period-group" id="sensor-period-group">
+          <button class="period-btn" data-days="1">1д</button>
+          <button class="period-btn" data-days="3">3д</button>
+          <button class="period-btn active" data-days="7">7д</button>
+          <button class="period-btn" data-days="14">14д</button>
+        </div>
+        <label class="chart-toggle" title="Показать/скрыть границы нормы на всех графиках датчиков">
+          <input type="checkbox" id="sensor-bounds" checked> Границы
+        </label>
+        <label class="chart-toggle" title="Отметить точки выхода за норму красными маркерами">
+          <input type="checkbox" id="sensor-anomalies" checked> Аномалии
+        </label>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6" id="sensor-grid"></div>
+  </main>
+
+  <!-- Модальное окно: развёрнутый график -->
+  <div class="modal-overlay hidden" id="chart-modal" role="dialog" aria-modal="true" aria-labelledby="modal-chart-title">
+    <div class="spa-card modal-card-wide">
+      <div class="modal-head">
+        <h3 class="h3" style="margin:0" id="modal-chart-title">—</h3>
+        <button class="icon-btn" id="modal-close" aria-label="Закрыть">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-controls-bar">
+        <div class="period-group" id="modal-period-group">
+          <button class="period-btn" data-days="1">1д</button>
+          <button class="period-btn" data-days="3">3д</button>
+          <button class="period-btn active" data-days="7">7д</button>
+          <button class="period-btn" data-days="14">14д</button>
+          <button class="period-btn" data-days="30">30д</button>
+        </div>
+        <label class="chart-toggle" id="modal-bounds-lbl">
+          <input type="checkbox" id="modal-bounds" checked> Границы
+        </label>
+        <label class="chart-toggle">
+          <input type="checkbox" id="modal-smooth"> Сглаживание
+        </label>
+        <label class="chart-toggle" id="modal-anomalies-lbl">
+          <input type="checkbox" id="modal-anomalies" checked> Аномалии
+        </label>
+        <label class="chart-toggle">
+          <input type="checkbox" id="modal-zero"> От нуля
+        </label>
+        <button class="btn btn-sm" id="modal-export" style="margin-left:auto" title="Скачать данные графика в CSV">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Скачать CSV
+        </button>
+      </div>
+      <div class="modal-chart-body">
+        <canvas id="modal-canvas" style="max-height:1380px" role="img"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    /* ── Константы и справочники ─────────────────────────────────────────── */
+    const parts = location.pathname.split("/").filter(Boolean);
+    const machineId = decodeURIComponent(parts[parts.length - 1] || "");
+    const enc = encodeURIComponent(machineId);
+
+    const SENSORS = [
+      { key: "temperature_c",        label: "Температура",           unit: "°C",   digits: 1, color: "#E8743B" },
+      { key: "vibration_mms",        label: "Вибрация",              unit: "мм/с", digits: 1, color: "#F2A33C" },
+      { key: "sound_db",             label: "Уровень шума",          unit: "дБ",   digits: 0, color: "#4F86C6" },
+      { key: "oil_level_pct",        label: "Уровень масла",         unit: "%",    digits: 0, color: "#2FA36B" },
+      { key: "coolant_level_pct",    label: "Охлаждающая жидкость",  unit: "%",    digits: 0, color: "#3E6DBF" },
+      { key: "power_consumption_kw", label: "Потребляемая мощность", unit: "кВт",  digits: 0, color: "#8E5FC0" },
+    ];
+
+    /* ── Состояние ───────────────────────────────────────────────────────── */
+    let cfg = { threshold: 0.33, limits: {} };
+    let _preds = [];   // predictions, сортировка: новые — последние
+    let _telem = [];   // telemetry, сортировка: новые — последние
+
+    const STATE = {
+      proba:  { period: 7, bounds: true,  smooth: false },
+      rul:    { period: 7,               smooth: false },
+      sensor: { period: 7, bounds: true,  anomalies: true },
+      avg:    { period: 7 },
+      modal:  { period: 7, bounds: true, smooth: false, anomalies: true, fromZero: false },
+    };
+
+    const charts = {};
+    let modalChart = null;
+    let modalKey = null;
+
+    /* ── Утилиты ─────────────────────────────────────────────────────────── */
+    function filterByDays(arr, days) {
+      const cutoff = Date.now() - days * 86400000;
+      return arr.filter(r => new Date(r.timestamp).getTime() >= cutoff);
+    }
+
+    function movingAvg(data, w) {
+      w = w || 7;
+      return data.map(function (_, i) {
+        const half = Math.floor(w / 2);
+        const slice = data.slice(Math.max(0, i - half), Math.min(data.length, i + half + 1));
+        const valid = slice.filter(function (v) { return v != null && !isNaN(v); });
+        return valid.length ? valid.reduce(function (a, b) { return a + b; }, 0) / valid.length : null;
+      });
+    }
+
+    function exportCSV(key, labels, values) {
+      const sensor = SENSORS.find(function (s) { return s.key === key; });
+      let header;
+      if (sensor) header = "Время," + sensor.label + " (" + sensor.unit + ")\n";
+      else if (key === "proba") header = "Время,P(отказа)\n";
+      else header = "Время,RUL (дн.)\n";
+      const rows = labels.map(function (l, i) {
+        return '"' + l + '",' + (values[i] != null ? values[i] : "");
+      }).join("\n");
+      const blob = new Blob(["﻿" + header + rows], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = machineId + "_" + key + ".csv";
+      a.click(); URL.revokeObjectURL(url);
+    }
+
+    function setActivePeriodBtn(groupId, days) {
+      const group = document.getElementById(groupId);
+      if (!group) return;
+      group.querySelectorAll(".period-btn").forEach(function (b) {
+        b.classList.toggle("active", +b.dataset.days === days);
+      });
+    }
+
+    /* Компактный форматтер меток оси X: длина зависит от выбранного периода.
+       ≤1д → "ЧЧ:ММ"  |  ≤7д → "ДД.ММ ЧЧ:ММ"  |  >7д → "ДД.ММ.ГГ" */
+    function fmtLabel(ts, days) {
+      const d = new Date(ts);
+      const p = function (n) { return String(n).padStart(2, "0"); };
+      if (days <= 1) return p(d.getHours()) + ":" + p(d.getMinutes());
+      if (days <= 7) return p(d.getDate()) + "." + p(d.getMonth() + 1) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+      return p(d.getDate()) + "." + p(d.getMonth() + 1) + "." + String(d.getFullYear()).slice(2);
+    }
+
+    function setupPeriodGroup(groupId, onChange) {
+      const group = document.getElementById(groupId);
+      if (!group) return;
+      group.querySelectorAll(".period-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          group.querySelectorAll(".period-btn").forEach(function (b) { b.classList.remove("active"); });
+          btn.classList.add("active");
+          onChange(+btn.dataset.days);
+        });
+      });
+    }
+
+    /* ── Chart.js: опции ─────────────────────────────────────────────────── */
+    function chartOptions(compact) {
+      const t = SPA.themeColors();
+      return {
+        responsive: true, animation: false, maintainAspectRatio: true,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: compact ? { display: false } : {
+            display: true,
+            position: "bottom",
+            align: "start",
+            labels: {
+              boxWidth: 24, boxHeight: 2,
+              color: t.text, font: { size: 11.5, weight: "600" },
+              padding: 18, usePointStyle: false,
+              filter: function (item) { return item.text !== "_anomaly"; },
+            },
+          },
+          tooltip: {
+            backgroundColor: t.surface, titleColor: t.strong, bodyColor: t.strong,
+            borderColor: t.grid, borderWidth: 1, padding: 10, cornerRadius: 8,
+            displayColors: true, boxWidth: 8, boxHeight: 8,
+            filter: function (item) { return item.dataset.label !== "_anomaly"; },
+          },
+        },
+        scales: {
+          x: {
+            ticks: { color: t.text, maxRotation: 0, autoSkip: true, maxTicksLimit: compact ? 4 : 6, font: { size: 10 } },
+            grid: { display: false },
+          },
+          y: {
+            ticks: { color: t.text, font: { size: 10 } },
+            grid: { color: t.grid, drawTicks: false },
+          },
+        },
+      };
+    }
+
+    /* ── Chart.js: построение датасетов ─────────────────────────────────── */
+    function makeGradient(ctx, area, color) {
+      if (!area) return color + "22";
+      const g = ctx.createLinearGradient(0, area.top, 0, area.bottom);
+      g.addColorStop(0, color + "55"); g.addColorStop(1, color + "08");
+      return g;
+    }
+
+    function buildDatasets(key, color, hlines, includeSmooth, includeAnomaly) {
+      const mainLabel = key === "proba" ? "P(отказа)"
+                      : key === "rul"   ? "RUL, дн."
+                      : (SENSORS.find(function (s) { return s.key === key; }) || {}).label || key;
+      const ds = [{
+        label: mainLabel, data: [],
+        borderColor: color,
+        backgroundColor: function (ctx) { return makeGradient(ctx.chart.ctx, ctx.chart.chartArea, color); },
+        tension: 0.3, pointRadius: 0, pointHoverRadius: 3, borderWidth: 2, fill: true,
+      }];
+      (hlines || []).forEach(function (h) {
+        const hds = {
+          label: h.label, data: [], _hvalue: h.value,
+          borderColor: h.color, borderDash: [5, 4],
+          pointRadius: 0, borderWidth: 1.4, fill: false,
+        };
+        ds.push(hds);
+      });
+      if (includeSmooth) {
+        const trendColor = SPA.themeColors().text + "DD";
+        ds.push({
+          label: "Тренд", data: [],
+          borderColor: trendColor, borderDash: [3, 3],
+          pointRadius: 0, borderWidth: 2, fill: false, tension: 0.5,
+        });
+      }
+      if (includeAnomaly) {
+        ds.push({
+          label: "_anomaly", data: [],
+          borderColor: "transparent", backgroundColor: "#E5564A",
+          pointRadius: 4, pointHoverRadius: 6, pointStyle: "circle",
+          showLine: false, fill: false,
+        });
+      }
+      return ds;
+    }
+
+    /* ── Создание Chart-экземпляра ───────────────────────────────────────── */
+    function makeChart(canvasId, key, color, hlines, compact, withSmooth, withAnomaly) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return null;
+      const ds = buildDatasets(key, color, hlines, withSmooth, withAnomaly);
+      const chart = new Chart(canvas, {
+        type: "line",
+        data: { labels: [], datasets: ds },
+        options: chartOptions(compact),
+      });
+      chart._key = key;
+      chart._color = color;
+      chart._hlines = hlines || [];
+      return chart;
+    }
+
+    /* ── Обновление данных графика ───────────────────────────────────────── */
+    function updateChart(chart, labels, values, opts) {
+      if (!chart) return;
+      const bounds    = opts.bounds    !== false;
+      const smooth    = !!opts.smooth;
+      const anomalies = !!opts.anomalies;
+      const fromZero  = !!opts.fromZero;
+      const limits    = opts.limits || null;
+
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = values;
+
+      chart.data.datasets.forEach(function (ds) {
+        if (ds === chart.data.datasets[0]) return;
+        if (ds.label === "Тренд") {
+          ds.data = smooth ? movingAvg(values) : labels.map(function () { return null; });
+        } else if (ds.label === "_anomaly") {
+          if (limits) {
+            const lo = limits[0], hi = limits[1];
+            ds.data = anomalies ? values.map(function (v) {
+              return (v != null && ((lo != null && v < lo) || (hi != null && v > hi))) ? v : null;
+            }) : labels.map(function () { return null; });
+          }
+        } else if (ds._hvalue !== undefined) {
+          ds.data = bounds ? labels.map(function () { return ds._hvalue; })
+                           : labels.map(function () { return null; });
+        }
+      });
+
+      if (chart.options.scales && chart.options.scales.y) {
+        chart.options.scales.y.min = fromZero ? 0 : undefined;
+      }
+      chart.update("none");
+    }
+
+    /* ── Построение всех графиков ────────────────────────────────────────── */
+    function buildCharts() {
+      const t = SPA.themeColors();
+      const crit = "#E5564A", warn = "#E0A100";
+
+      charts.proba = makeChart("c-proba", "proba", t.brand,
+        [{ label: "Порог t* = " + cfg.threshold, value: cfg.threshold, color: crit }],
+        false, true, false);
+
+      charts.rul = makeChart("c-rul", "rul", "#2FA36B", [], false, true, false);
+
+      SENSORS.forEach(function (s) {
+        const lim = cfg.limits[s.key];
+        const hl = [];
+        if (lim) {
+          if (lim[1] != null) hl.push({ label: "Верхняя граница", value: lim[1], color: crit });
+          if (lim[0] != null && lim[0] > 0) hl.push({ label: "Нижняя граница", value: lim[0], color: warn });
+        }
+        charts[s.key] = makeChart("c-" + s.key, s.key, s.color, hl, true, false, true);
+      });
+    }
+
+    function destroyCharts() {
+      Object.keys(charts).forEach(function (k) {
+        if (charts[k]) { charts[k].destroy(); delete charts[k]; }
+      });
+    }
+
+    /* ── Генерация HTML сеткой датчиков ─────────────────────────────────── */
+    function buildSensorGrid() {
+      document.getElementById("sensor-grid").innerHTML = SENSORS.map(function (s) {
+        return '<section class="spa-card">'
+          + '<div class="sensor-card-head">'
+          + '<span class="sensor-card-title">' + s.label + ', ' + s.unit + '</span>'
+          + '<button class="expand-btn" data-expand="' + s.key + '" title="Развернуть">'
+          + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>'
+          + '</button></div>'
+          + '<div class="sensor-body"><canvas id="c-' + s.key + '" style="max-height:221px" role="img" aria-label="График: ' + s.label + '"></canvas></div>'
+          + '</section>';
+      }).join("");
+    }
+
+    /* ── Отрисовка KPI ───────────────────────────────────────────────────── */
+    function renderKpis(preds) {
+      const last = preds[preds.length - 1] || {};
+      const prob = last.failure_probability != null ? last.failure_probability : null;
+      const rul  = last.remaining_useful_life_days != null ? last.remaining_useful_life_days : null;
+
+      const probEl = document.getElementById("kpi-prob");
+      probEl.textContent = prob !== null ? prob.toFixed(3) : "—";
+      const pc = SPA.probClass(prob);
+      probEl.style.color = pc === "crit" ? "var(--crit)" : pc === "warn" ? "var(--warn)" : "var(--ok)";
+
+      const arc = document.getElementById("gauge-arc");
+      if (arc) {
+        const circ = 2 * Math.PI * 52;
+        const frac = prob != null ? Math.max(0, Math.min(1, prob)) : 0;
+        arc.setAttribute("stroke-dasharray", (frac * circ).toFixed(1) + " " + circ.toFixed(1));
+        arc.classList.remove("val-ok", "val-warn", "val-crit");
+        arc.classList.add("val-" + (pc || "ok"));
+      }
+
+      document.getElementById("kpi-rul").textContent = rul !== null ? rul.toFixed(1) : "—";
+
+      const statusEl = document.getElementById("kpi-status");
+      if ((window._opHours || 0) < 1000 || !preds.length) {
+        statusEl.innerHTML = '<span class="badge badge-blue"><span class="dot"></span>новое</span>';
+      } else if (prob !== null && prob >= cfg.threshold) {
+        statusEl.innerHTML = '<span class="badge badge-red"><span class="dot"></span>предаварийное</span>';
+      } else {
+        statusEl.innerHTML = '<span class="badge badge-green"><span class="dot"></span>норма</span>';
+      }
+      document.getElementById("kpi-ts").textContent = last.timestamp ? SPA.fmtTs(last.timestamp) : "—";
+    }
+
+    /* ── Отрисовка таблицы средних значений ──────────────────────────────── */
+    function renderSensorTable(avgs) {
+      document.getElementById("sensor-avg-body").innerHTML = SENSORS.map(function (s) {
+        const v   = avgs[s.key];
+        const lim = cfg.limits[s.key] || [null, null];
+        const k   = SPA.sensorClass(s.key, v, cfg.limits);
+        const cls = k ? "val-" + k : "";
+        const evalText = k === "crit" ? "Выход из нормы"
+                       : k === "warn" ? "Пограничное"
+                       : v != null    ? "Норма" : "—";
+        const range = (lim[0] != null && lim[1] != null) ? lim[0] + " – " + lim[1] : "—";
+        const val   = v != null ? v.toFixed(s.digits) : "—";
+        let posBar = '<span class="text-muted">—</span>';
+        if (v != null && lim[0] != null && lim[1] != null && lim[1] > lim[0]) {
+          const pos = Math.max(0, Math.min(100, (v - lim[0]) / (lim[1] - lim[0]) * 100));
+          posBar = '<div class="bar-cell"><span class="mini-bar is-' + (k || "ok") + '"><span style="width:' + pos.toFixed(0) + '%"></span></span></div>';
+        }
+        return "<tr>"
+          + "<td>" + s.label + "</td>"
+          + '<td class="tnum ' + cls + '">' + val + '<span class="text-muted text-xs" style="margin-left:4px">' + s.unit + "</span></td>"
+          + '<td class="tnum text-muted">' + range + "</td>"
+          + "<td>" + posBar + "</td>"
+          + "<td>" + (k ? '<span class="eval-pill ' + cls + '">' + evalText + "</span>" : '<span class="text-muted">—</span>') + "</td>"
+          + "</tr>";
+      }).join("");
+    }
+
+    /* ── Применение данных к графикам ────────────────────────────────────── */
+    function applyPredCharts() {
+      const pd = filterByDays(_preds, STATE.proba.period);
+      updateChart(charts.proba,
+        pd.map(function (p) { return fmtLabel(p.timestamp, STATE.proba.period); }),
+        pd.map(function (p) { return p.failure_probability; }),
+        { bounds: STATE.proba.bounds, smooth: STATE.proba.smooth });
+
+      const rd = filterByDays(_preds, STATE.rul.period);
+      updateChart(charts.rul,
+        rd.map(function (p) { return fmtLabel(p.timestamp, STATE.rul.period); }),
+        rd.map(function (p) { return p.remaining_useful_life_days; }),
+        { bounds: false, smooth: STATE.rul.smooth });
+    }
+
+    function applySensorCharts() {
+      const td = filterByDays(_telem, STATE.sensor.period);
+      const labels = td.map(function (t) { return fmtLabel(t.timestamp, STATE.sensor.period); });
+      SENSORS.forEach(function (s) {
+        updateChart(charts[s.key], labels,
+          td.map(function (t) { return t[s.key]; }),
+          { bounds: STATE.sensor.bounds, anomalies: STATE.sensor.anomalies, limits: cfg.limits[s.key] || null });
+      });
+    }
+
+    /* ── Модальное окно ──────────────────────────────────────────────────── */
+    function openModal(key) {
+      modalKey = key;
+      const sensor = SENSORS.find(function (s) { return s.key === key; });
+      const isSensor = !!sensor;
+
+      const titles = {
+        proba: "Вероятность отказа, динамика",
+        rul:   "Остаточный ресурс (RUL), дн.",
+      };
+      document.getElementById("modal-chart-title").textContent = isSensor
+        ? sensor.label + ", " + sensor.unit : (titles[key] || key);
+
+      // Границы: только для proba и sensor charts
+      document.getElementById("modal-bounds-lbl").style.display = key === "rul" ? "none" : "";
+      // Аномалии: только для датчиков
+      document.getElementById("modal-anomalies-lbl").style.display = isSensor ? "" : "none";
+
+      // Наследуем состояние от исходного графика
+      const src = isSensor ? STATE.sensor : STATE[key];
+      STATE.modal.period    = src ? (src.period || 7) : 7;
+      STATE.modal.bounds    = isSensor ? STATE.sensor.bounds : (STATE[key] ? STATE[key].bounds !== false : true);
+      STATE.modal.smooth    = src ? (src.smooth || false) : false;
+      STATE.modal.anomalies = isSensor ? STATE.sensor.anomalies : false;
+      STATE.modal.fromZero  = false;
+
+      setActivePeriodBtn("modal-period-group", STATE.modal.period);
+      document.getElementById("modal-bounds").checked    = STATE.modal.bounds;
+      document.getElementById("modal-smooth").checked    = STATE.modal.smooth;
+      document.getElementById("modal-anomalies").checked = STATE.modal.anomalies;
+      document.getElementById("modal-zero").checked      = false;
+
+      document.getElementById("chart-modal").classList.remove("hidden");
+      document.body.style.overflow = "hidden";
+      rebuildModalChart();
+    }
+
+    function rebuildModalChart() {
+      if (modalChart) { modalChart.destroy(); modalChart = null; }
+      const key = modalKey;
+      const sensor = SENSORS.find(function (s) { return s.key === key; });
+      const color  = sensor ? sensor.color : (key === "rul" ? "#2FA36B" : SPA.themeColors().brand);
+      const lim    = sensor ? (cfg.limits[key] || null) : null;
+      const crit   = "#E5564A", warn = "#E0A100";
+      const hlines = [];
+      if (key === "proba") {
+        hlines.push({ label: "Порог t* = " + cfg.threshold, value: cfg.threshold, color: crit });
+      } else if (lim) {
+        if (lim[1] != null) hlines.push({ label: "Верхняя граница", value: lim[1], color: crit });
+        if (lim[0] != null && lim[0] > 0) hlines.push({ label: "Нижняя граница", value: lim[0], color: warn });
+      }
+      const ds = buildDatasets(key, color, hlines, true, !!sensor);
+      const canvas = document.getElementById("modal-canvas");
+      const opts = chartOptions(false);
+      opts.maintainAspectRatio = false;
+      modalChart = new Chart(canvas, { type: "line", data: { labels: [], datasets: ds }, options: opts });
+      modalChart._key    = key;
+      modalChart._color  = color;
+      modalChart._hlines = hlines;
+      modalChart._lim    = lim;
+      updateModalChart();
+    }
+
+    function updateModalChart() {
+      if (!modalChart) return;
+      const key = modalKey;
+      const isPred = key === "proba" || key === "rul";
+      let labels, values;
+      if (isPred) {
+        const d = filterByDays(_preds, STATE.modal.period);
+        labels = d.map(function (p) { return fmtLabel(p.timestamp, STATE.modal.period); });
+        values = d.map(function (p) { return key === "proba" ? p.failure_probability : p.remaining_useful_life_days; });
+      } else {
+        const d = filterByDays(_telem, STATE.modal.period);
+        labels = d.map(function (t) { return fmtLabel(t.timestamp, STATE.modal.period); });
+        values = d.map(function (t) { return t[key]; });
+      }
+      updateChart(modalChart, labels, values, {
+        bounds:    STATE.modal.bounds,
+        smooth:    STATE.modal.smooth,
+        anomalies: STATE.modal.anomalies,
+        fromZero:  STATE.modal.fromZero,
+        limits:    modalChart._lim,
+      });
+      modalChart._lastLabels = labels;
+      modalChart._lastValues = values;
+    }
+
+    function closeModal() {
+      document.getElementById("chart-modal").classList.add("hidden");
+      document.body.style.overflow = "";
+      if (modalChart) { modalChart.destroy(); modalChart = null; }
+      modalKey = null;
+    }
+
+    /* ── Привязка событий ────────────────────────────────────────────────── */
+    function wireControls() {
+      // Таблица: период средних значений
+      setupPeriodGroup("avg-period-group", async function (days) {
+        STATE.avg.period = days;
+        try {
+          const avgs = await SPA.fetchJSON("/telemetry/" + enc + "/sensor-averages?days=" + days);
+          renderSensorTable(avgs);
+        } catch (e) { /* silent */ }
+      });
+
+      // График вероятности отказа
+      setupPeriodGroup("proba-period-group", function (days) { STATE.proba.period = days; applyPredCharts(); });
+      document.getElementById("proba-bounds").addEventListener("change", function (e) {
+        STATE.proba.bounds = e.target.checked; applyPredCharts();
+      });
+      document.getElementById("proba-smooth").addEventListener("change", function (e) {
+        STATE.proba.smooth = e.target.checked; applyPredCharts();
+      });
+
+      // График RUL
+      setupPeriodGroup("rul-period-group", function (days) { STATE.rul.period = days; applyPredCharts(); });
+      document.getElementById("rul-smooth").addEventListener("change", function (e) {
+        STATE.rul.smooth = e.target.checked; applyPredCharts();
+      });
+
+      // Глобальные настройки датчиков
+      setupPeriodGroup("sensor-period-group", function (days) { STATE.sensor.period = days; applySensorCharts(); });
+      document.getElementById("sensor-bounds").addEventListener("change", function (e) {
+        STATE.sensor.bounds = e.target.checked; applySensorCharts();
+      });
+      document.getElementById("sensor-anomalies").addEventListener("change", function (e) {
+        STATE.sensor.anomalies = e.target.checked; applySensorCharts();
+      });
+
+      // Expand-кнопки (делегирование)
+      document.addEventListener("click", function (e) {
+        const btn = e.target.closest("[data-expand]");
+        if (btn) openModal(btn.dataset.expand);
+      });
+
+      // Модальное окно: закрытие
+      document.getElementById("modal-close").addEventListener("click", closeModal);
+      document.getElementById("chart-modal").addEventListener("click", function (e) {
+        if (e.target === document.getElementById("chart-modal")) closeModal();
+      });
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape" && !document.getElementById("chart-modal").classList.contains("hidden")) closeModal();
+      });
+
+      // Модальное окно: настройки
+      setupPeriodGroup("modal-period-group", function (days) { STATE.modal.period = days; updateModalChart(); });
+      document.getElementById("modal-bounds").addEventListener("change", function (e) {
+        STATE.modal.bounds = e.target.checked; updateModalChart();
+      });
+      document.getElementById("modal-smooth").addEventListener("change", function (e) {
+        STATE.modal.smooth = e.target.checked; updateModalChart();
+      });
+      document.getElementById("modal-anomalies").addEventListener("change", function (e) {
+        STATE.modal.anomalies = e.target.checked; updateModalChart();
+      });
+      document.getElementById("modal-zero").addEventListener("change", function (e) {
+        STATE.modal.fromZero = e.target.checked; updateModalChart();
+      });
+      document.getElementById("modal-export").addEventListener("click", function () {
+        if (modalChart && modalChart._lastLabels) {
+          exportCSV(modalKey, modalChart._lastLabels, modalChart._lastValues);
+        }
+      });
+    }
+
+    /* ── Загрузка метаданных агрегата ────────────────────────────────────── */
+    async function loadMeta() {
+      try {
+        const m = await SPA.fetchJSON("/equipment/" + enc);
+        window._opHours = m.operational_hours || 0;
+        document.getElementById("m-title").textContent = m.display_name || machineId;
+        const bits = ["ID: <strong>" + machineId + "</strong>"];
+        if (m.machine_type)      bits.push("Тип: <strong>" + m.machine_type + "</strong>");
+        if (m.category)          bits.push("Категория: <strong>" + m.category + "</strong>");
+        if (m.operational_hours) bits.push("Наработка: <strong>" + Math.round(m.operational_hours) + " ч.</strong>");
+        document.getElementById("m-meta").innerHTML = bits.join("&nbsp;&nbsp;|&nbsp;&nbsp;");
+      } catch (e) { document.getElementById("m-title").textContent = machineId; }
+    }
+
+    /* ── Получение и обновление данных ───────────────────────────────────── */
+    async function refresh() {
+      try {
+        const [predsRaw, telemRaw, avgs] = await Promise.all([
+          SPA.fetchJSON("/predictions/" + enc + "?limit=1000"),
+          SPA.fetchJSON("/telemetry/" + enc + "?limit=1000"),
+          SPA.fetchJSON("/telemetry/" + enc + "/sensor-averages?days=" + STATE.avg.period),
+        ]);
+        // API возвращает новые записи первыми — разворачиваем для хронологии
+        _preds = predsRaw.slice().reverse();
+        _telem = telemRaw.slice().reverse();
+
+        renderKpis(_preds);
+        renderSensorTable(avgs);
+        applyPredCharts();
+        applySensorCharts();
+        if (modalKey) updateModalChart();
+      } catch (e) { /* silent */ }
+    }
+
+    // Перестройка графиков при смене темы
+    document.addEventListener("spa-theme", function () {
+      destroyCharts(); buildCharts(); applyPredCharts(); applySensorCharts();
+    });
+
+    /* ── Инициализация ───────────────────────────────────────────────────── */
+    async function init() {
+      cfg = await SPA.config();
+      document.getElementById("hero-thr").textContent = cfg.threshold;
+      await loadMeta();
+      buildSensorGrid();
+      buildCharts();
+      wireControls();
+      await refresh();
+      setInterval(refresh, 30000);
+    }
+    init();
+  })();
+  </script>
+</body>
+</html>
