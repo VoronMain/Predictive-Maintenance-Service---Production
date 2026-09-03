@@ -45,7 +45,7 @@ python run.py               # сервер на http://127.0.0.1:8000 + эмул
 
 ## Живой стенд
 
-https://predictive-maintenance-service-production-production.up.railway.app
+https://predictive-maintenance-service-production.up.railway.app
 
 Стенд закрыт HTTP Basic: открыт только `/health`, всё остальное — включая
 `/docs` — требует пароль. Учётные данные выдаёт автор проекта, в репозитории
