@@ -25,9 +25,16 @@ def _ensure_models_on_path() -> None:
     такого каталога нет — например, в Docker-образе или в копии
     репозитория без соседних каталогов — функция ничего не делает и не
     бросает исключений.
+
+    Каталог добавляется в КОНЕЦ sys.path: вкомпилированный в репозиторий
+    пакет всегда имеет приоритет над возможной устаревшей копией в
+    ..\\Модели\\predictive_maintenance. Иначе запуск из корня репозитория
+    на машине автора незаметно подменял бы пакет старой версией, и
+    правки в predictive_maintenance/ (в т. ч. фикс issue #11) не
+    применялись бы локально, расходясь с тем, что деплоится.
     """
     models_dir = Path(__file__).resolve().parents[2] / "Модели"
     if models_dir.is_dir():
         models_dir_str = str(models_dir)
         if models_dir_str not in sys.path:
-            sys.path.insert(0, models_dir_str)
+            sys.path.append(models_dir_str)

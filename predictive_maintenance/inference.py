@@ -19,6 +19,18 @@ from catboost import CatBoostRegressor
 from .preprocessing import restore_mnar_for_regression
 from .schema import FEATURE_COLUMNS, validate_features
 
+# Отступ от границ [0, 1] для калиброванной вероятности. Изотоническая
+# калибровка (out_of_bounds='clip') отображает весь левый хвост сырых
+# оценок LightGBM в ровный 0.0: крайнему узлу PAV-решения соответствует
+# y=0. На демо-данных почти всё «неаварийное» оборудование получает сырую
+# оценку у левой границы калибратора, из-за чего живой инференс отдаёт
+# ровно p=0.000 (issue #11). Такой жёсткий ноль переусложняет калибратор:
+# он теряет способность ранжировать здоровые агрегаты между собой,
+# ломает лог-функции потерь и вводит оператора в заблуждение. Поджимаем
+# результат в [EPS, 1-EPS]: значение ниже разрешения отображения (3 знака),
+# модель по сути не искажается, но абсолютного нуля/единицы больше нет.
+PROBABILITY_EPSILON = 1e-4
+
 
 @dataclass
 class FailurePrediction:
@@ -141,10 +153,18 @@ class PredictiveMaintenanceModel:
 
     # ---------------- инференс ---------------- #
     def predict_failure_proba(self, df: pd.DataFrame) -> np.ndarray:
-        """Возвращает калиброванные вероятности класса 'Отказ в 7 суток'."""
+        """Возвращает калиброванные вероятности класса 'Отказ в 7 суток'.
+
+        Результат поджат в [PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON],
+        чтобы изотонический калибратор не выдавал ровные 0.0 / 1.0 на
+        хвостах распределения (см. комментарий к PROBABILITY_EPSILON).
+        """
         X = validate_features(df)
         raw = self.lightgbm.predict_proba(X)[:, 1]
         calibrated = self.calibrator.transform(raw)
+        calibrated = np.clip(
+            calibrated, PROBABILITY_EPSILON, 1.0 - PROBABILITY_EPSILON
+        )
         return np.asarray(calibrated, dtype=np.float64)
 
     def predict_failure(
