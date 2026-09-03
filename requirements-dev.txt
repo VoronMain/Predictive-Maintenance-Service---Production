@@ -1,0 +1,9 @@
+# Зависимости для запуска тестов (pytest). В рантайм-образ не входят:
+# Dockerfile ставит только requirements.txt, а tests/ исключены через
+# .dockerignore. Ставится поверх requirements.txt локально и в CI.
+-r requirements.txt
+
+pytest>=8.0,<9.0
+# FastAPI TestClient (app/main.py тестируется через tests/http_test.py)
+# работает поверх httpx; в рантайме сервису он не нужен.
+httpx>=0.27,<1.0
