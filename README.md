@@ -17,7 +17,9 @@
 | `predictive_maintenance/` | пакет инференса с артефактами обученных моделей |
 | `run.py` | локальный запуск: HTTP-сервер + эмулятор в одном сеансе |
 | `.env.example` | список переменных окружения |
-| `requirements.txt` | зависимости |
+| `requirements.txt` | зависимости рантайма |
+| `requirements-dev.txt` | зависимости для запуска тестов (`pytest`, `httpx`) |
+| `tests/` | тесты HTTP-интерфейса и инференса |
 
 ## Локальный запуск
 
@@ -30,6 +32,16 @@ python run.py               # сервер на http://127.0.0.1:8000 + эмул
 
 По умолчанию бэкенд хранения — SQLite (`data/spa.db`). Для PostgreSQL задать
 `SPA_DB_BACKEND=postgres` и параметры `SPA_PG_*` в `.env`.
+
+## Тесты
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Тесты прогоняются автоматически на каждый PR и push в `main`
+(`.github/workflows/ci.yml`), там же собирается контрольный Docker-образ.
 
 ## Веб-интерфейс
 
