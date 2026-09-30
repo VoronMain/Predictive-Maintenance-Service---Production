@@ -215,3 +215,38 @@ def test_ingest_requires_auth_and_works_with_credentials(client):
 def test_static_asset_open_without_auth(client):
     r = client.get("/static/spa.css")
     assert r.status_code == 200
+
+
+# --------------------------------------------------------------- #
+# Публичный демо-стенд (SPA_PUBLIC_DASHBOARD=true): чтение открыто,
+# запись по-прежнему только с учётными данными.
+# --------------------------------------------------------------- #
+@pytest.fixture
+def public_dashboard():
+    original = settings.PUBLIC_DASHBOARD
+    settings.PUBLIC_DASHBOARD = True
+    try:
+        yield
+    finally:
+        settings.PUBLIC_DASHBOARD = original
+
+
+def test_public_dashboard_off_by_default():
+    assert settings.PUBLIC_DASHBOARD is False
+
+
+@pytest.mark.parametrize("path", ["/", "/equipment", "/predictions/overview"])
+def test_public_dashboard_opens_reads(client, public_dashboard, path):
+    r = client.get(path)
+    assert r.status_code == 200
+
+
+def test_public_dashboard_keeps_writes_closed(client, public_dashboard):
+    r = client.post("/ingest", json=_ingest_payload())
+    assert r.status_code == 401
+
+    r = client.put("/settings/notifications", json={})
+    assert r.status_code == 401
+
+    r = client.post("/ingest", json=_ingest_payload(), auth=AUTH)
+    assert r.status_code in (200, 202), r.text

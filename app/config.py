@@ -107,6 +107,10 @@ class Settings:
     # иначе локальный запуск и автотесты с дефолтными admin/admin
     # перестанут работать. На публичном стенде (Railway) включается явно.
     REQUIRE_STRONG_AUTH: bool = _as_bool(os.getenv("SPA_REQUIRE_STRONG_AUTH", "false"))
+    # Публичный демо-стенд: чтение (GET/HEAD) открыто без пароля, запись
+    # (/ingest, PUT настроек) по-прежнему требует HTTP Basic. По умолчанию
+    # выключен — включается только на демонстрационном стенде.
+    PUBLIC_DASHBOARD: bool = _as_bool(os.getenv("SPA_PUBLIC_DASHBOARD", "false"))
 
     # ------------------------------------------------------------ #
     # Подсистема оповещений (email)
