@@ -452,11 +452,11 @@
         render(data);
         if (data && data.length > 0) {
           const latest = data.reduce((a, b) => {
-            const ta = new Date(a.updated_at || 0).getTime();
-            const tb = new Date(b.updated_at || 0).getTime();
+            const ta = new Date(a.timestamp || 0).getTime();
+            const tb = new Date(b.timestamp || 0).getTime();
             return ta > tb ? a : b;
           });
-          const ts = latest.updated_at ? SPA.fmtTs(latest.updated_at) : "—";
+          const ts = latest.timestamp ? SPA.fmtTs(latest.timestamp) : "—";
           document.getElementById("freshness-ts").textContent = ts;
         }
       } catch (e) {
