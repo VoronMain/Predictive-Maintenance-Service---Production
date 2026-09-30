@@ -4,11 +4,12 @@ seeder.py — засев исторических данных кузнечно-
 
 При первом запуске системы заполняет базу данных 14 днями
 ретроспективных измерений телеметрии и предсказаний для 30 агрегатов.
-Предсказания формируются тем же ML-сервисом, что обслуживает живой
-поток: по каждому историческому измерению строится вектор признаков
-(features.build_feature_vector) и выполняется реальный инференс. Тем
-самым история и поступающие в реальном времени данные считаются
-единой моделью, что исключает разрыв прогнозов на их стыке.
+Засев только порождает исторические измерения; всё остальное — окно,
+признаки, инференс, предсказания, журнал отказов, часовые агрегаты —
+делает конвейер оценки (Pipeline.ingest_history) тем же путём, что и для
+живого потока, но без оповещений. Тем самым история и поступающие в
+реальном времени данные считаются едиными правилами, что исключает
+разрыв прогнозов и степеней критичности на их стыке.
 
 Для предаварийных агрегатов исторический рост риска создаётся разгоном
 наработки (Operational_Hours) в пределах окна засева — именно она
@@ -23,14 +24,8 @@ from __future__ import annotations
 import logging
 import random
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
-import pandas as pd
-
-from .buffer import AggregationManager
-from .config import settings
 from .db_base import DatabaseProtocol
-from .features import build_feature_vector
 from .forge_machines import (
     FORGE_MACHINES,
     SEED_HISTORY_DAYS,
@@ -38,7 +33,7 @@ from .forge_machines import (
     ForgeMachine,
     generate_sensor_values,
 )
-from .ml_service import MLService
+from .pipeline import Pipeline
 from .schema import EquipmentRecord, TelemetryMeasurement
 
 log = logging.getLogger(__name__)
@@ -74,17 +69,15 @@ def _seed_operational_hours(machine: ForgeMachine, t: float,
     return max(0.0, machine.operational_hours - days_ago * 24 * _OPS_RATE)
 
 
-def seed_historical_data(db: DatabaseProtocol, ml_service: MLService,
+def seed_historical_data(pipeline: Pipeline,
                          machines: list[ForgeMachine] = None,
                          days: int = SEED_HISTORY_DAYS) -> None:
-    """Засевает исторические данные для всех агрегатов реальным инференсом.
+    """Засевает исторические данные для всех агрегатов через конвейер оценки.
 
     Parameters
     ----------
-    db : SQLiteDatabase | PostgresDatabase
-        Экземпляр подсистемы хранения данных.
-    ml_service : MLService
-        Сервис ML-инференса; те же модели обслуживают живой поток.
+    pipeline : Pipeline
+        Конвейер оценки; история идёт в ingest_history (без оповещений).
     machines : list[ForgeMachine], optional
         Список агрегатов. При None используется FORGE_MACHINES.
     days : int
@@ -93,10 +86,8 @@ def seed_historical_data(db: DatabaseProtocol, ml_service: MLService,
     if machines is None:
         machines = FORGE_MACHINES
 
-    threshold = settings.FAILURE_THRESHOLD
-    model = ml_service.model
     now = datetime.now(timezone.utc)
-    total_records = 0
+    measurements: list[TelemetryMeasurement] = []
 
     for machine in machines:
         effective_days = min(days, machine.history_days)
@@ -105,7 +96,7 @@ def seed_historical_data(db: DatabaseProtocol, ml_service: MLService,
             n_steps = 1
 
         # Регистрация агрегата с категорией.
-        db.upsert_equipment(EquipmentRecord(
+        pipeline.db.upsert_equipment(EquipmentRecord(
             machine_id=machine.machine_id,
             machine_type=machine.ml_type,
             operational_hours=machine.operational_hours,
@@ -114,20 +105,6 @@ def seed_historical_data(db: DatabaseProtocol, ml_service: MLService,
 
         # Детерминированный генератор шума: уникальный seed на машину.
         rng = random.Random(abs(hash(machine.machine_id)) % (2 ** 32))
-
-        # Буфер агрегации повторяет путь живого конвейера: окно меньше шага
-        # сетки (2 ч), поэтому в каждый момент агрегат строится по одному
-        # последнему измерению — как при потоковой обработке.
-        aggregator = AggregationManager(
-            window_seconds=settings.AGGREGATION_WINDOW_SECONDS
-        )
-
-        incident_id: Optional[int] = None
-        telemetry_rows: list[tuple] = []
-        # Параллельные списки: метки времени и векторы признаков для пакетного
-        # инференса по всему окну агрегата за один вызов модели.
-        timestamps: list[datetime] = []
-        feature_frames: list[pd.DataFrame] = []
 
         for step in range(n_steps):
             # Временна́я метка: самая ранняя точка → «сейчас».
@@ -145,7 +122,7 @@ def seed_historical_data(db: DatabaseProtocol, ml_service: MLService,
             ops_hours = _seed_operational_hours(machine, t, days_ago)
 
             try:
-                measurement = TelemetryMeasurement(
+                measurements.append(TelemetryMeasurement(
                     machine_id=machine.machine_id,
                     machine_type=machine.ml_type,
                     timestamp=dt,
@@ -162,72 +139,11 @@ def seed_historical_data(db: DatabaseProtocol, ml_service: MLService,
                     ai_supervision=True,
                     error_codes_last_30_days=sensors["error_codes_last_30_days"],
                     ai_override_events=sensors["ai_override_events"],
-                )
+                ))
             except Exception as exc:
                 log.warning("Пропуск некорректного измерения %s t=%.2f: %s",
                             machine.machine_id, t, exc)
-                continue
 
-            payload = measurement.model_dump(mode="json")
-            ts_iso = dt.isoformat()
-            telemetry_rows.append((
-                machine.machine_id,
-                ts_iso,
-                __import__("json").dumps(payload, ensure_ascii=False),
-            ))
-
-            aggregator.append(measurement)
-            aggregate = aggregator.aggregate(machine.machine_id)
-            feature_frames.append(build_feature_vector(aggregate))
-            timestamps.append(dt)
-
-        if not feature_frames:
-            continue
-
-        # Пакетный инференс по всему окну агрегата: один вызов на каждую модель.
-        frame = pd.concat(feature_frames, ignore_index=True)
-        failure = model.predict_failure(frame, threshold=threshold)
-        rul = model.predict_rul(frame)
-
-        prediction_rows: list[tuple] = []
-        incident_events: list[tuple] = []
-        for i, dt in enumerate(timestamps):
-            prob = float(failure.probability[i])
-            label = int(failure.label[i])
-            rul_days = float(rul.rul_days[i])
-            prediction_rows.append((
-                machine.machine_id, dt.isoformat(),
-                round(prob, 4), label, round(rul_days, 2), threshold,
-            ))
-            incident_events.append((dt, prob, rul_days))
-        total_records += len(prediction_rows)
-
-        # Пакетная вставка всех строк одной транзакцией.
-        db.bulk_insert_for_seed(telemetry_rows, prediction_rows)
-
-        # Открываем/обновляем инцидент для предаварийных агрегатов.
-        for dt, prob, rul_days in incident_events:
-            if machine.state != "pre_failure":
-                break
-            if incident_id is None and prob >= threshold:
-                severity = ("critical" if prob >= 0.55
-                            else "high" if prob >= 0.45 else "medium")
-                try:
-                    incident_id = db.open_incident(
-                        machine.machine_id, dt, prob, rul_days, threshold, severity
-                    )
-                except Exception as exc:
-                    log.warning("Ошибка открытия инцидента %s: %s",
-                                machine.machine_id, exc)
-            elif incident_id is not None and prob > threshold:
-                peak_sev = "critical" if prob >= 0.55 else "high"
-                try:
-                    db.update_open_incident(incident_id, prob, rul_days, peak_sev)
-                except Exception:
-                    pass
-
-        log.debug("Засев %s: %d точек (состояние=%s)",
-                  machine.machine_id, n_steps, machine.state)
-
-    log.info("Засев завершён: %d записей по %d агрегатам",
-             total_records, len(machines))
+    predictions = pipeline.ingest_history(measurements)
+    log.info("Засев завершён: %d предсказаний по %d агрегатам",
+             len(predictions), len(machines))

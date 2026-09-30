@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
+
+import pandas as pd
 
 from .buffer import AggregationManager
 from .db_base import DatabaseProtocol
@@ -20,7 +22,12 @@ from .features import build_feature_vector
 from .incidents import IncidentDetector, IncidentEvent
 from .ml_service import MLService
 from .notifications import NotificationService
-from .schema import EquipmentRecord, PredictionRecord, TelemetryMeasurement
+from .schema import (
+    EquipmentRecord,
+    HourlyAggregateRecord,
+    PredictionRecord,
+    TelemetryMeasurement,
+)
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +118,80 @@ class Pipeline:
         # Детектирование инцидента и формирование оповещения.
         self._handle_incident(prediction, measurement.machine_type)
         return prediction
+
+    def ingest_history(
+        self, measurements: Iterable[TelemetryMeasurement]
+    ) -> list[PredictionRecord]:
+        """Обрабатывает пачку исторических измерений тем же путём, что и поток.
+
+        Измерения одного или нескольких агрегатов; окно, признаки, порог и
+        журнал отказов — те же, что у ingest(). Отличия входа «история»
+        три: инференс пакетный (один вызов модели на агрегат), запись в
+        хранилище одной транзакцией на агрегат и отсутствие оповещений —
+        это свойство входа, а не флаг. Справочник агрегатов не
+        обновляется: его ведёт засев, а историческая наработка затёрла бы
+        текущую.
+
+        Агрегаты независимы: ошибка по одному (инференс, запись, журнал
+        отказов) пишется в лог с трейсбеком и не мешает остальным.
+
+        Returns
+        -------
+        list[PredictionRecord]
+            Предсказания успешно обработанных агрегатов в порядке времени.
+        """
+        by_machine: dict[str, list[TelemetryMeasurement]] = {}
+        for measurement in sorted(measurements, key=lambda m: m.timestamp):
+            by_machine.setdefault(measurement.machine_id, []).append(measurement)
+
+        predictions: list[PredictionRecord] = []
+        for machine_id, series in by_machine.items():
+            try:
+                predictions.extend(self._ingest_machine_history(series))
+            except Exception:
+                log.exception("Ошибка обработки истории агрегата %s", machine_id)
+        predictions.sort(key=lambda p: p.timestamp)
+        return predictions
+
+    def _ingest_machine_history(
+        self, series: list[TelemetryMeasurement]
+    ) -> list[PredictionRecord]:
+        """История одного агрегата (измерения упорядочены по времени)."""
+        # Окно истории — отдельное, но с теми же правилами: последнее
+        # историческое измерение (метка «сейчас») не должно попасть в окно
+        # первого живого измерения и исказить его признаки.
+        aggregator = AggregationManager(self.aggregator.window_seconds)
+        scored: list[TelemetryMeasurement] = []
+        frames: list[pd.DataFrame] = []
+        hourly: list[HourlyAggregateRecord] = []
+        for measurement in series:
+            aggregator.append(measurement)
+            aggregate = aggregator.aggregate(measurement.machine_id)
+            if aggregate is None or aggregate["n_samples"] < self.min_samples_for_inference:
+                continue
+            features = build_feature_vector(aggregate)
+            hourly.append(HourlyAggregateRecord(
+                machine_id=measurement.machine_id,
+                window_end=aggregate["window_end"],
+                features=features.iloc[0].to_dict(),
+            ))
+            frames.append(features)
+            scored.append(measurement)
+
+        predictions: list[PredictionRecord] = []
+        if frames:
+            predictions = self.ml.predict_batch(
+                pd.concat(frames, ignore_index=True),
+                [m.machine_id for m in scored],
+                [m.timestamp for m in scored],
+            )
+        # Сырые измерения сохраняются все, в том числе не дошедшие до инференса.
+        self.db.insert_history(series, predictions, hourly)
+
+        if self.incidents is not None:
+            for prediction in predictions:
+                self.incidents.process(prediction)
+        return predictions
 
     def _handle_incident(self, prediction: PredictionRecord,
                           machine_type: str) -> None:

@@ -49,16 +49,30 @@ class MLService:
     def predict(self, features: pd.DataFrame, machine_id: str,
                 timestamp: datetime) -> PredictionRecord:
         """Выполняет совмещённый инференс и возвращает запись предсказания."""
+        return self.predict_batch(features, [machine_id], [timestamp])[0]
+
+    def predict_batch(self, features: pd.DataFrame, machine_ids: list[str],
+                      timestamps: list[datetime]) -> list[PredictionRecord]:
+        """Совмещённый инференс по пачке векторов признаков.
+
+        Строка ``features[i]`` относится к агрегату ``machine_ids[i]`` на
+        момент ``timestamps[i]``. Одиночный predict() — частный случай
+        этого метода, поэтому порог и формирование записи предсказания
+        одинаковы для потока и для истории.
+        """
         failure = self.model.predict_failure(features, threshold=self.threshold)
         rul = self.model.predict_rul(features)
-        return PredictionRecord(
-            machine_id=machine_id,
-            timestamp=timestamp,
-            failure_probability=float(failure.probability[0]),
-            failure_label=int(failure.label[0]),
-            remaining_useful_life_days=float(rul.rul_days[0]),
-            threshold=self.threshold,
-        )
+        return [
+            PredictionRecord(
+                machine_id=machine_id,
+                timestamp=timestamp,
+                failure_probability=float(failure.probability[i]),
+                failure_label=int(failure.label[i]),
+                remaining_useful_life_days=float(rul.rul_days[i]),
+                threshold=self.threshold,
+            )
+            for i, (machine_id, timestamp) in enumerate(zip(machine_ids, timestamps))
+        ]
 
     def info(self) -> dict:
         return self.model.info()
