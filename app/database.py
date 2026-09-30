@@ -28,7 +28,12 @@ from pathlib import Path
 from typing import Optional
 
 from .config import settings
-from .schema import EquipmentRecord, PredictionRecord, TelemetryMeasurement
+from .schema import (
+    EquipmentRecord,
+    HourlyAggregateRecord,
+    PredictionRecord,
+    TelemetryMeasurement,
+)
 
 log = logging.getLogger(__name__)
 
@@ -335,31 +340,47 @@ class SQLiteDatabase:
             )
         return self.get_notification_settings()
 
-    # ===== Пакетная вставка для засева (одна транзакция на всю партию) =====
-    def bulk_insert_for_seed(
+    # ===== Пакетная запись истории (одна транзакция на всю партию) =====
+    def insert_history(
         self,
-        telemetry_rows: list[tuple],
-        prediction_rows: list[tuple],
+        measurements: list[TelemetryMeasurement],
+        predictions: list[PredictionRecord],
+        hourly_aggregates: list[HourlyAggregateRecord],
     ) -> None:
-        """Вставляет данные засева одной транзакцией.
+        """Записывает историю типизированными записями одной транзакцией.
 
-        telemetry_rows: список кортежей (machine_id, timestamp, payload_json)
-        prediction_rows: список кортежей
-            (machine_id, timestamp, failure_probability,
-             failure_label, remaining_useful_life_days, threshold)
+        Формат строк совпадает с поштучными insert_raw_measurement,
+        insert_prediction и insert_hourly_aggregate живого потока.
         """
         with self.transaction() as conn:
             conn.executemany(
                 "INSERT OR IGNORE INTO telemetry_raw(machine_id, timestamp, payload) "
                 "VALUES (?, ?, ?)",
-                telemetry_rows,
+                [
+                    (m.machine_id, m.timestamp.isoformat(),
+                     json.dumps(m.model_dump(mode="json"), ensure_ascii=False))
+                    for m in measurements
+                ],
             )
             conn.executemany(
                 "INSERT OR IGNORE INTO predictions"
                 "(machine_id, timestamp, failure_probability, "
                 "failure_label, remaining_useful_life_days, threshold) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                prediction_rows,
+                [
+                    (p.machine_id, p.timestamp.isoformat(), p.failure_probability,
+                     p.failure_label, p.remaining_useful_life_days, p.threshold)
+                    for p in predictions
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO telemetry_hourly(machine_id, window_end, features) "
+                "VALUES (?, ?, ?)",
+                [
+                    (h.machine_id, h.window_end.isoformat(),
+                     json.dumps(h.features, ensure_ascii=False, default=float))
+                    for h in hourly_aggregates
+                ],
             )
 
     # ===== Raw telemetry =====

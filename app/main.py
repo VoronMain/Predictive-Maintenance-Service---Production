@@ -128,17 +128,6 @@ async def lifespan(app: FastAPI):
         settings.MODELS_DIR, threshold=settings.FAILURE_THRESHOLD
     )
 
-    # Засев выполняется тем же ML-сервисом, что и живой поток, поэтому
-    # инициализируется после загрузки моделей. Это исключает разрыв
-    # прогнозов на стыке исторических и потоковых данных.
-    if not is_already_seeded(db):
-        log.info("Засев исторических данных (%d дн.) для %d агрегатов...",
-                 SEED_HISTORY_DAYS, len(FORGE_MACHINES))
-        await asyncio.to_thread(seed_historical_data, db, ml, FORGE_MACHINES,
-                                days=SEED_HISTORY_DAYS)
-    else:
-        log.info("Засев пропущен — исторические данные уже присутствуют в БД.")
-
     aggregator = AggregationManager(window_seconds=settings.AGGREGATION_WINDOW_SECONDS)
 
     log.info("Инициализация подсистемы оповещений (режим=%s)",
@@ -153,6 +142,17 @@ async def lifespan(app: FastAPI):
         incident_detector=incidents,
         notifier=notifier,
     )
+
+    # Засев идёт через тот же конвейер оценки, что и живой поток (режим
+    # «история» не отправляет оповещений), поэтому правила критичности,
+    # порог t* и журнал отказов в истории и в потоке совпадают.
+    if not is_already_seeded(db):
+        log.info("Засев исторических данных (%d дн.) для %d агрегатов...",
+                 SEED_HISTORY_DAYS, len(FORGE_MACHINES))
+        await asyncio.to_thread(seed_historical_data, pipeline, FORGE_MACHINES,
+                                days=SEED_HISTORY_DAYS)
+    else:
+        log.info("Засев пропущен — исторические данные уже присутствуют в БД.")
 
     app.state.db = db
     app.state.ml = ml

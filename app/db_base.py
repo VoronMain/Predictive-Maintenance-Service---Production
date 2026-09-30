@@ -10,7 +10,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Protocol, runtime_checkable
 
-from .schema import EquipmentRecord, PredictionRecord, TelemetryMeasurement
+from .schema import (
+    EquipmentRecord,
+    HourlyAggregateRecord,
+    PredictionRecord,
+    TelemetryMeasurement,
+)
 
 
 @runtime_checkable
@@ -35,9 +40,10 @@ class DatabaseProtocol(Protocol):
                                 features: dict) -> None: ...
     def get_sensor_averages(self, machine_id: str, days: int = 7) -> dict: ...
 
-    # ===== Seeding =====
-    def bulk_insert_for_seed(self, telemetry_rows: list[tuple],
-                             prediction_rows: list[tuple]) -> None: ...
+    # ===== History =====
+    def insert_history(self, measurements: list[TelemetryMeasurement],
+                       predictions: list[PredictionRecord],
+                       hourly_aggregates: list[HourlyAggregateRecord]) -> None: ...
 
     # ===== Incidents =====
     def get_open_incident(self, machine_id: str) -> Optional[dict]: ...

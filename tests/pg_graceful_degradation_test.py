@@ -46,6 +46,7 @@ PostgresContainer = _pg.PostgresContainer
 
 from app.schema import (  # noqa: E402
     EquipmentRecord,
+    HourlyAggregateRecord,
     PredictionRecord,
     TelemetryMeasurement,
 )
@@ -245,24 +246,38 @@ def test_prediction_write_and_read(db):
     assert per_machine[0]["failure_probability"] == 0.7
 
 
-def test_bulk_seed_and_aggregate_reads(db):
+def test_insert_history_and_aggregate_reads(db):
     db.upsert_equipment(EquipmentRecord(machine_id="M-30", machine_type="Furnace"))
     now = datetime.now(timezone.utc)
-    telemetry_rows = [
-        (
-            "M-30",
-            (now - timedelta(hours=h)).isoformat(),
-            '{"temperature_c": %d, "vibration_mms": 10, "sound_db": 90, '
-            '"oil_level_pct": 60, "coolant_level_pct": 70, '
-            '"power_consumption_kw": 250}' % (60 + h),
+    measurements = [
+        TelemetryMeasurement(
+            machine_id="M-30", machine_type="Furnace",
+            timestamp=now - timedelta(hours=h), operational_hours=1000,
+            temperature_c=60 + h, vibration_mms=10, sound_db=90,
+            oil_level_pct=60, coolant_level_pct=70, power_consumption_kw=250,
+            last_maintenance_days_ago=10, maintenance_history_count=1,
+            failure_history_count=0, ai_supervision=True,
+            error_codes_last_30_days=0, ai_override_events=0,
         )
         for h in range(3)
     ]
-    prediction_rows = [
-        ("M-30", (now - timedelta(hours=h)).isoformat(), 0.2 + 0.1 * h, 0, 25.0, 0.33)
+    predictions = [
+        PredictionRecord(
+            machine_id="M-30", timestamp=now - timedelta(hours=h),
+            failure_probability=0.2 + 0.1 * h, failure_label=0,
+            remaining_useful_life_days=25.0, threshold=0.33,
+        )
         for h in range(3)
     ]
-    db.bulk_insert_for_seed(telemetry_rows, prediction_rows)
+    hourly = [
+        HourlyAggregateRecord(
+            machine_id="M-30", window_end=now - timedelta(hours=h),
+            features={"temperature_c_mean": 60.0 + h,
+                      "vibration_mms_mean": float("nan")},
+        )
+        for h in range(3)
+    ]
+    db.insert_history(measurements, predictions, hourly)
 
     averages = db.get_sensor_averages("M-30", days=7)
     assert averages["temperature_c"] == pytest.approx(61.0, abs=0.01)
@@ -272,6 +287,12 @@ def test_bulk_seed_and_aggregate_reads(db):
     # Свежайшая запись (h=0): предсказание 0.2, температура 60.
     assert m30["failure_probability"] == pytest.approx(0.2)
     assert m30["temperature_c"] == pytest.approx(60.0)
+
+    with db._conn.cursor() as cur:
+        cur.execute("SELECT features FROM telemetry_hourly WHERE machine_id = 'M-30'")
+        rows = cur.fetchall()
+    assert len(rows) == 3
+    assert all(r["features"]["vibration_mms_mean"] is None for r in rows)  # NaN → None
 
 
 def test_hourly_aggregate_write(db):

@@ -111,6 +111,14 @@ class PredictionRecord(BaseModel):
     threshold: float = Field(..., ge=0.0, le=1.0)
 
 
+class HourlyAggregateRecord(BaseModel):
+    """Часовой агрегат признаков, сохраняемый в таблице telemetry_hourly."""
+
+    machine_id: str
+    window_end: datetime
+    features: dict
+
+
 class EquipmentRecord(BaseModel):
     """Справочная запись о единице оборудования."""
 
