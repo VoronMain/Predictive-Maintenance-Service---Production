@@ -39,10 +39,26 @@ logging.basicConfig(
 )
 log = logging.getLogger("spa")
 
-security = HTTPBasic()
+# auto_error=False — чтобы при SPA_PUBLIC_DASHBOARD=true запрос на чтение
+# без заголовка Authorization доходил до authenticate, а не получал 401
+# ещё внутри HTTPBasic.
+security = HTTPBasic(auto_error=False)
+
+_READ_ONLY_METHODS = {"GET", "HEAD"}
 
 
-def authenticate(credentials: Annotated[HTTPBasicCredentials, Depends(security)]):
+def authenticate(
+    request: Request,
+    credentials: Annotated[HTTPBasicCredentials | None, Depends(security)],
+):
+    if settings.PUBLIC_DASHBOARD and request.method in _READ_ONLY_METHODS:
+        return "public"
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Требуется аутентификация",
+            headers={"WWW-Authenticate": "Basic"},
+        )
     correct_user = secrets.compare_digest(
         credentials.username, settings.BASIC_AUTH_USER
     )

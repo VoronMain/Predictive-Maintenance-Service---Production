@@ -25,6 +25,11 @@ COPY emulator/ ./emulator/
 COPY predictive_maintenance/ ./predictive_maintenance/
 COPY start.py ./start.py
 
+# Каталог данных (SQLite, письма-оповещения) доступен на запись любому
+# пользователю: часть платформ (Hugging Face Spaces) запускает контейнер
+# не от root, а /app после COPY принадлежит root.
+RUN mkdir -p /app/data && chmod 777 /app/data
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
