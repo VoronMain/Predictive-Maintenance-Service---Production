@@ -287,6 +287,24 @@ def test_incident_open_at_end_of_history_continues_live(stand):
     assert same["peak_severity"] == "critical"
 
 
+# ------------------------------------------------------------ изоляция ошибок
+
+def test_failure_of_one_machine_is_logged_and_does_not_stop_others(stand, caplog):
+    good = _series("G-1", [NORMAL, MEDIUM, HIGH])
+    bad = _series("G-BAD", [NORMAL, MEDIUM])  # не в справочнике → сбой записи
+    stand.register(*good)
+
+    with caplog.at_level("ERROR"):
+        predictions = stand.pipeline.ingest_history(good + bad)
+
+    assert {p.machine_id for p in predictions} == {"G-1"}
+    assert len(stand.predictions("G-1")) == 3
+    assert stand.predictions("G-BAD") == []
+    assert [i["machine_id"] for i in stand.incidents()] == ["G-1"]
+    failures = [r for r in caplog.records if "G-BAD" in r.getMessage()]
+    assert failures and failures[0].exc_info  # с трейсбеком, а не молча
+
+
 # --------------------------------------------------------------------- засев
 
 @pytest.fixture(scope="module")
