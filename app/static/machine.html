@@ -616,14 +616,6 @@
 
       document.getElementById("kpi-rul").textContent = rul !== null ? rul.toFixed(1) : "—";
 
-      const statusEl = document.getElementById("kpi-status");
-      if ((window._opHours || 0) < 1000 || !preds.length) {
-        statusEl.innerHTML = '<span class="badge badge-blue"><span class="dot"></span>новое</span>';
-      } else if (prob !== null && prob >= cfg.threshold) {
-        statusEl.innerHTML = '<span class="badge badge-red"><span class="dot"></span>предаварийное</span>';
-      } else {
-        statusEl.innerHTML = '<span class="badge badge-green"><span class="dot"></span>норма</span>';
-      }
       document.getElementById("kpi-ts").textContent = last.timestamp ? SPA.fmtTs(last.timestamp) : "—";
     }
 
@@ -846,17 +838,33 @@
     }
 
     /* ── Загрузка метаданных агрегата ────────────────────────────────────── */
+    function renderStatus(status) {
+      const statusEl = document.getElementById("kpi-status");
+      if (status === "pre_failure") {
+        statusEl.innerHTML = '<span class="badge badge-red"><span class="dot"></span>предаварийное</span>';
+      } else if (status === "new") {
+        statusEl.innerHTML = '<span class="badge badge-blue"><span class="dot"></span>новое</span>';
+      } else if (status === "normal") {
+        statusEl.innerHTML = '<span class="badge badge-green"><span class="dot"></span>норма</span>';
+      } else {
+        statusEl.textContent = "—";
+      }
+    }
+
     async function loadMeta() {
       try {
         const m = await SPA.fetchJSON("/equipment/" + enc);
-        window._opHours = m.operational_hours || 0;
+        renderStatus(m.status);
         document.getElementById("m-title").textContent = m.display_name || machineId;
         const bits = ["ID: <strong>" + machineId + "</strong>"];
         if (m.machine_type)      bits.push("Тип: <strong>" + m.machine_type + "</strong>");
         if (m.category)          bits.push("Категория: <strong>" + m.category + "</strong>");
         if (m.operational_hours) bits.push("Наработка: <strong>" + Math.round(m.operational_hours) + " ч.</strong>");
         document.getElementById("m-meta").innerHTML = bits.join("&nbsp;&nbsp;|&nbsp;&nbsp;");
-      } catch (e) { document.getElementById("m-title").textContent = machineId; }
+      } catch (e) {
+        document.getElementById("m-title").textContent = machineId;
+        renderStatus(null);
+      }
     }
 
     /* ── Получение и обновление данных ───────────────────────────────────── */
@@ -877,6 +885,8 @@
         applySensorCharts();
         if (modalKey) updateModalChart();
       } catch (e) { /* silent */ }
+      // Статус обновляется вместе с вероятностью и RUL; при сбое остаётся прежний.
+      try { renderStatus((await SPA.fetchJSON("/equipment/" + enc)).status); } catch (e) { /* silent */ }
     }
 
     // Перестройка графиков при смене темы
