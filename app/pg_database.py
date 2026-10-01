@@ -142,6 +142,18 @@ CREATE INDEX IF NOT EXISTS idx_alerts_machine_ts
 CREATE INDEX IF NOT EXISTS idx_alerts_group
     ON alerts_log(group_key, sent_at DESC);
 
+-- Состав сводного оповещения: по записи на агрегат группы со своим
+-- инцидентом и временем события (от него считается окно подавления).
+CREATE TABLE IF NOT EXISTS alert_members (
+    alert_id BIGINT NOT NULL REFERENCES alerts_log(id),
+    machine_id TEXT NOT NULL REFERENCES equipment(machine_id),
+    incident_id BIGINT REFERENCES incidents_log(id),
+    event_time TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (alert_id, machine_id)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_members_machine
+    ON alert_members(machine_id, event_time DESC);
+
 CREATE TABLE IF NOT EXISTS notification_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     email_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -756,16 +768,49 @@ class PostgresDatabase:
     # Alerts log
     # ------------------------------------------------------------ #
     def last_alert_for_machine(self, machine_id: str) -> Optional[dict]:
+        """Последнее успешное оповещение по агрегату — одиночное или в
+        составе сводного. У сводного sent_at и incident_id берутся из
+        записи состава этого агрегата."""
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
+                "SELECT a.*, m.event_time AS member_time, "
+                "m.incident_id AS member_incident FROM alerts_log a "
+                "JOIN alert_members m ON m.alert_id = a.id "
+                "WHERE m.machine_id = %s AND a.status = 'sent' "
+                "ORDER BY m.event_time DESC LIMIT 1",
+                (machine_id,),
+            )
+            grouped = cur.fetchone()
+            cur.execute(
                 "SELECT * FROM alerts_log WHERE machine_id = %s AND status='sent' "
+                "AND NOT EXISTS (SELECT 1 FROM alert_members m "
+                "WHERE m.alert_id = alerts_log.id) "
                 "ORDER BY sent_at DESC LIMIT 1",
                 (machine_id,),
             )
             row = cur.fetchone()
-            if row:
-                row["sent_at"] = _iso(row.get("sent_at"))
-            return row
+        if grouped is not None and (row is None
+                                    or grouped["member_time"] > row["sent_at"]):
+            row = grouped
+            row["sent_at"] = row.pop("member_time")
+            row["incident_id"] = row.pop("member_incident")
+        if row:
+            row["sent_at"] = _iso(row.get("sent_at"))
+        return row
+
+    def _alert_members(self, cur, alert_ids: list[int]) -> dict[int, list[dict]]:
+        if not alert_ids:
+            return {}
+        cur.execute(
+            "SELECT alert_id, machine_id, incident_id FROM alert_members "
+            "WHERE alert_id = ANY(%s) ORDER BY machine_id",
+            (alert_ids,),
+        )
+        out: dict[int, list[dict]] = {}
+        for r in cur.fetchall():
+            out.setdefault(r["alert_id"], []).append(
+                {"machine_id": r["machine_id"], "incident_id": r["incident_id"]})
+        return out
 
     def get_alert(self, alert_id: int) -> Optional[dict]:
         with self._lock, self._conn.cursor() as cur:
@@ -776,8 +821,10 @@ class PostgresDatabase:
                 (alert_id,),
             )
             row = cur.fetchone()
-            if row:
-                row["sent_at"] = _iso(row.get("sent_at"))
+            if not row:
+                return None
+            row["sent_at"] = _iso(row.get("sent_at"))
+            row["members"] = self._alert_members(cur, [alert_id]).get(alert_id, [])
             return row
 
     def insert_alert(self, incident_id: Optional[int], machine_id: str,
@@ -786,7 +833,11 @@ class PostgresDatabase:
                      severity: str = _DEFAULT_SEVERITY,
                      group_key: Optional[str] = None,
                      grouped_count: int = 1,
-                     error: Optional[str] = None) -> int:
+                     error: Optional[str] = None,
+                     members: Optional[list[dict]] = None) -> int:
+        """Записывает попытку доставки. members — состав сводного
+        оповещения: [{machine_id, incident_id, event_time}], пишется в
+        той же транзакции."""
         with self.transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO alerts_log(incident_id, machine_id, sent_at, recipient, "
@@ -796,7 +847,14 @@ class PostgresDatabase:
                 (incident_id, machine_id, sent_at, recipient, subject, body,
                  channel, severity, group_key, grouped_count, status, error),
             )
-            return int(cur.fetchone()["id"])
+            alert_id = int(cur.fetchone()["id"])
+            for m in members or ():
+                cur.execute(
+                    "INSERT INTO alert_members(alert_id, machine_id, incident_id, "
+                    "event_time) VALUES (%s, %s, %s, %s)",
+                    (alert_id, m["machine_id"], m["incident_id"], m["event_time"]),
+                )
+            return alert_id
 
     def list_alerts(self, limit: int = 100) -> list[dict]:
         with self._lock, self._conn.cursor() as cur:
@@ -807,8 +865,10 @@ class PostgresDatabase:
                 (limit,),
             )
             rows = cur.fetchall()
+            members = self._alert_members(cur, [r["id"] for r in rows])
         for r in rows:
             r["sent_at"] = _iso(r.get("sent_at"))
+            r["members"] = members.get(r["id"], [])
         return rows
 
     def close(self) -> None:

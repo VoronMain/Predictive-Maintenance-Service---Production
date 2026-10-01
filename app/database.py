@@ -128,6 +128,21 @@ CREATE INDEX IF NOT EXISTS idx_alerts_machine_ts
 CREATE INDEX IF NOT EXISTS idx_alerts_group
     ON alerts_log(group_key, sent_at);
 
+-- Состав сводного оповещения: по записи на агрегат группы со своим
+-- инцидентом и временем события (от него считается окно подавления).
+CREATE TABLE IF NOT EXISTS alert_members (
+    alert_id INTEGER NOT NULL,
+    machine_id TEXT NOT NULL,
+    incident_id INTEGER,
+    event_time TEXT NOT NULL,
+    PRIMARY KEY (alert_id, machine_id),
+    FOREIGN KEY (alert_id) REFERENCES alerts_log(id),
+    FOREIGN KEY (machine_id) REFERENCES equipment(machine_id),
+    FOREIGN KEY (incident_id) REFERENCES incidents_log(id)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_members_machine
+    ON alert_members(machine_id, event_time);
+
 CREATE TABLE IF NOT EXISTS notification_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     email_enabled INTEGER NOT NULL DEFAULT 1,
@@ -583,14 +598,50 @@ class SQLiteDatabase:
 
     # ===== Alerts log =====
     def last_alert_for_machine(self, machine_id: str) -> Optional[dict]:
+        """Последнее успешное оповещение по агрегату — одиночное или в
+        составе сводного. У сводного sent_at и incident_id берутся из
+        записи состава этого агрегата."""
         with self._lock:
             cur = self._conn.execute(
+                "SELECT a.*, m.event_time AS member_time, "
+                "m.incident_id AS member_incident FROM alerts_log a "
+                "JOIN alert_members m ON m.alert_id = a.id "
+                "WHERE m.machine_id = ? AND a.status = 'sent' "
+                "ORDER BY m.event_time DESC LIMIT 1",
+                (machine_id,),
+            )
+            grouped = cur.fetchone()
+            cur = self._conn.execute(
                 "SELECT * FROM alerts_log WHERE machine_id = ? AND status='sent' "
+                "AND NOT EXISTS (SELECT 1 FROM alert_members m "
+                "WHERE m.alert_id = alerts_log.id) "
                 "ORDER BY sent_at DESC LIMIT 1",
                 (machine_id,),
             )
-            row = cur.fetchone()
-            return dict(row) if row else None
+            single = cur.fetchone()
+        row = dict(single) if single else None
+        if grouped is not None:
+            g = dict(grouped)
+            g["sent_at"] = g.pop("member_time")
+            g["incident_id"] = g.pop("member_incident")
+            if row is None or g["sent_at"] > row["sent_at"]:
+                row = g
+        return row
+
+    def _alert_members(self, alert_ids: list[int]) -> dict[int, list[dict]]:
+        if not alert_ids:
+            return {}
+        marks = ",".join("?" * len(alert_ids))
+        cur = self._conn.execute(
+            "SELECT alert_id, machine_id, incident_id FROM alert_members "
+            f"WHERE alert_id IN ({marks}) ORDER BY machine_id",
+            alert_ids,
+        )
+        out: dict[int, list[dict]] = {}
+        for r in cur.fetchall():
+            out.setdefault(r["alert_id"], []).append(
+                {"machine_id": r["machine_id"], "incident_id": r["incident_id"]})
+        return out
 
     def insert_alert(self, incident_id: Optional[int], machine_id: str,
                      sent_at: datetime, recipient: str, subject: str,
@@ -598,7 +649,11 @@ class SQLiteDatabase:
                      severity: str = _DEFAULT_SEVERITY,
                      group_key: Optional[str] = None,
                      grouped_count: int = 1,
-                     error: Optional[str] = None) -> int:
+                     error: Optional[str] = None,
+                     members: Optional[list[dict]] = None) -> int:
+        """Записывает попытку доставки. members — состав сводного
+        оповещения: [{machine_id, incident_id, event_time}], пишется в
+        той же транзакции."""
         with self.transaction() as conn:
             cur = conn.execute(
                 "INSERT INTO alerts_log(incident_id, machine_id, sent_at, recipient, "
@@ -609,7 +664,15 @@ class SQLiteDatabase:
                  subject, body, channel, severity, group_key, grouped_count,
                  status, error),
             )
-            return int(cur.lastrowid)
+            alert_id = int(cur.lastrowid)
+            for m in members or ():
+                conn.execute(
+                    "INSERT INTO alert_members(alert_id, machine_id, incident_id, "
+                    "event_time) VALUES (?, ?, ?, ?)",
+                    (alert_id, m["machine_id"], m["incident_id"],
+                     m["event_time"].isoformat()),
+                )
+            return alert_id
 
     def get_alert(self, alert_id: int) -> Optional[dict]:
         with self._lock:
@@ -620,7 +683,11 @@ class SQLiteDatabase:
                 (alert_id,),
             )
             row = cur.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            d = dict(row)
+            d["members"] = self._alert_members([alert_id]).get(alert_id, [])
+            return d
 
     def list_alerts(self, limit: int = 100) -> list[dict]:
         with self._lock:
@@ -631,7 +698,11 @@ class SQLiteDatabase:
                 "ORDER BY sent_at DESC LIMIT ?",
                 (limit,),
             )
-            return [dict(row) for row in cur.fetchall()]
+            rows = [dict(row) for row in cur.fetchall()]
+            members = self._alert_members([r["id"] for r in rows])
+        for r in rows:
+            r["members"] = members.get(r["id"], [])
+        return rows
 
     def close(self) -> None:
         with self._lock:

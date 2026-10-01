@@ -19,7 +19,7 @@ import pandas as pd
 from .buffer import AggregationManager
 from .db_base import DatabaseProtocol
 from .features import build_feature_vector
-from .incidents import IncidentDetector, IncidentEvent
+from .incidents import IncidentDetector
 from .ml_service import MLService
 from .notifications import NotificationService
 from .schema import (
@@ -197,21 +197,6 @@ class Pipeline:
         result = self.incidents.process(prediction)
         if self.notifier is None:
             return
-        if result.event == IncidentEvent.OPENED:
-            # Принудительная отправка при открытии инцидента —
-            # окно подавления повторов в этом случае игнорируется.
-            self.notifier.notify(
-                prediction=prediction,
-                machine_type=machine_type,
-                incident_id=result.incident_id,
-                force=True,
-            )
-        elif result.event == IncidentEvent.UPDATED:
-            # При продолжающемся инциденте оповещение отправляется
-            # повторно только за пределами окна подавления повторов.
-            self.notifier.notify(
-                prediction=prediction,
-                machine_type=machine_type,
-                incident_id=result.incident_id,
-                force=False,
-            )
+        # Исход детектора передаётся как есть: решение «оповещать ли»
+        # целиком принимает модуль оповещений.
+        self.notifier.handle(prediction, machine_type, result)

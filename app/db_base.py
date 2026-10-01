@@ -68,7 +68,8 @@ class DatabaseProtocol(Protocol):
                      severity: str = "medium",
                      group_key: Optional[str] = None,
                      grouped_count: int = 1,
-                     error: Optional[str] = None) -> int: ...
+                     error: Optional[str] = None,
+                     members: Optional[list[dict]] = None) -> int: ...
     def list_alerts(self, limit: int = 100) -> list[dict]: ...
 
     # ===== Notification settings =====
