@@ -17,7 +17,6 @@ http_test.py — тест HTTP-интерфейса СПА: авторизаци
 from __future__ import annotations
 
 import os
-import random
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -37,8 +36,9 @@ os.environ.setdefault("SPA_DB_BACKEND", "sqlite")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import settings  # noqa: E402
-from app.forge_machines import FORGE_MACHINES, generate_sensor_values  # noqa: E402
+from app.forge_machines import FORGE_MACHINES  # noqa: E402
 from app.main import app  # noqa: E402
+from app.trajectory import measure, noise_source, to_ingest_payload  # noqa: E402
 
 AUTH = (settings.BASIC_AUTH_USER, settings.BASIC_AUTH_PASSWORD)
 BAD_AUTH = ("wrong-user", "wrong-password")
@@ -47,31 +47,11 @@ _KNOWN_MACHINE = FORGE_MACHINES[0]
 
 
 def _ingest_payload() -> dict:
-    """Валидное измерение для известного агрегата — тот же формат,
-    что использует emulator/forge_stream.py."""
-    sensors = generate_sensor_values(_KNOWN_MACHINE, t=1.0, rng=random.Random(42))
-    return {
-        "machine_id": _KNOWN_MACHINE.machine_id,
-        "machine_type": _KNOWN_MACHINE.ml_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "operational_hours": _KNOWN_MACHINE.operational_hours,
-        "temperature_c": sensors["temperature_c"],
-        "vibration_mms": sensors["vibration_mms"],
-        "sound_db": sensors["sound_db"],
-        "oil_level_pct": sensors["oil_level_pct"],
-        "coolant_level_pct": sensors["coolant_level_pct"],
-        "power_consumption_kw": sensors["power_consumption_kw"],
-        "last_maintenance_days_ago": 10,
-        "maintenance_history_count": _KNOWN_MACHINE.maintenance_history_count,
-        "failure_history_count": _KNOWN_MACHINE.failure_history_count,
-        "ai_supervision": True,
-        "error_codes_last_30_days": sensors["error_codes_last_30_days"],
-        "ai_override_events": sensors["ai_override_events"],
-        "laser_intensity": None,
-        "hydraulic_pressure_bar": None,
-        "coolant_flow_l_min": None,
-        "heat_index": None,
-    }
+    """Валидное измерение для известного агрегата из module траектории —
+    в том же JSON-формате, что отправляет emulator/forge_stream.py."""
+    return to_ingest_payload(
+        measure(_KNOWN_MACHINE, 1.0, datetime.now(timezone.utc),
+                noise_source(_KNOWN_MACHINE)))
 
 
 # --------------------------------------------------------------- #

@@ -4,18 +4,18 @@ forge_machines.py — справочник агрегатов кузнечно-�
 
 Содержит 30 единиц оборудования, разделённых на четыре категории:
 Прессы, Молоты, Нагревательное оборудование, Вспомогательное оборудование.
-Используется засевочным модулем (seeder.py) и эмулятором потока
-(emulator/forge_stream.py).
+Читается module траектории агрегата (trajectory.py), засевом (seeder.py)
+и эмулятором потока (emulator/forge_stream.py).
 """
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
 from typing import Dict
 
 # Окно засева исторических данных в днях. Согласовано с вызовом
 # seed_historical_data в app/main.py и продолжением тренда деградации
-# в эмуляторе потока (emulator/forge_stream.py).
+# в эмуляторе потока (emulator/forge_stream.py); прогресс t нормируется на него
+# в app/trajectory.py.
 SEED_HISTORY_DAYS = 14
 
 
@@ -78,70 +78,6 @@ SENSOR_PROFILES: Dict[str, dict] = {
         "ai_override_events": 0,
     },
 }
-
-
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
-def generate_sensor_values(machine: "ForgeMachine", t: float,
-                           rng: random.Random) -> dict:
-    """Значения 6 датчиков + коды/override для прогресса деградации t.
-
-    Единый источник правды для засева (seeder.py) и потокового эмулятора
-    (forge_stream.py). Для предаварийных агрегатов накладывает монотонный
-    тренд деградации: при t ∈ [0, 1] он совпадает с окном засева, а при t > 1
-    продолжается за его пределы (живой поток стартует с t ≈ 1.0, то есть с
-    конца засеянной истории). Для normal/new агрегатов t игнорируется —
-    значения стационарны вокруг базового профиля.
-    """
-    profile = SENSOR_PROFILES[machine.state]
-
-    # Небольшое машинно-специфичное смещение для уникальности показаний.
-    m_seed = abs(hash(machine.machine_id)) % 1000 / 1000.0
-
-    if machine.state == "pre_failure":
-        # Деградация: температура и вибрация растут, масло и ОЖ снижаются.
-        # Эти признаки формируют визуальную картину износа на дашборде;
-        # на саму ML-модель они влияют слабо (риск задаёт наработка).
-        temp = profile["temperature_c"] + t * 6.0 + m_seed * 4.0
-        vib = profile["vibration_mms"] + t * 5.0 + m_seed * 2.0
-        oil = profile["oil_level_pct"] - t * 7.0 - m_seed * 3.0
-        cool = profile["coolant_level_pct"] - t * 5.0 - m_seed * 2.0
-        sound = profile["sound_db"] + t * 3.0 + m_seed * 2.0
-        power = profile["power_consumption_kw"] + t * 30.0 + m_seed * 20.0
-        # Коды ошибок и AI-override НЕ наращиваем по времени: см. примечание
-        # к профилю pre_failure — их рост снижал бы расчётную вероятность.
-        err = int(profile["error_codes_last_30_days"])
-        overr = int(profile["ai_override_events"])
-    else:
-        temp = profile["temperature_c"] + m_seed * 8.0
-        vib = profile["vibration_mms"] + m_seed * 4.0
-        oil = profile["oil_level_pct"] - m_seed * 10.0
-        cool = profile["coolant_level_pct"] - m_seed * 8.0
-        sound = profile["sound_db"] + m_seed * 4.0
-        power = profile["power_consumption_kw"] + m_seed * 50.0
-        err = profile["error_codes_last_30_days"]
-        overr = profile["ai_override_events"]
-
-    # Нормальный шум — имитирует естественные флуктуации.
-    temp += rng.gauss(0, 1.5)
-    vib += rng.gauss(0, 0.5)
-    oil += rng.gauss(0, 1.0)
-    cool += rng.gauss(0, 1.0)
-    sound += rng.gauss(0, 1.2)
-    power += rng.gauss(0, 8.0)
-
-    return {
-        "temperature_c": round(_clamp(temp, -50, 200), 1),
-        "vibration_mms": round(_clamp(vib, 0, 50), 2),
-        "sound_db": round(_clamp(sound, 0, 140), 1),
-        "oil_level_pct": round(_clamp(oil, 0, 100), 1),
-        "coolant_level_pct": round(_clamp(cool, 0, 100), 1),
-        "power_consumption_kw": round(_clamp(power, 0, 600), 1),
-        "error_codes_last_30_days": int(_clamp(err + rng.randint(-1, 1), 0, 100)),
-        "ai_override_events": int(_clamp(overr, 0, 50)),
-    }
 
 
 FORGE_MACHINES: list[ForgeMachine] = [

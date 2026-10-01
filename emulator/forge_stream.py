@@ -5,7 +5,8 @@ forge_stream.py — непрерывный эмулятор телеметрии
 Генерирует измерения для 30 фиксированных агрегатов и направляет их
 в эндпоинт /ingest монолитного приложения СПА. В отличие от emulator.py
 не зависит от CSV-датасета: базовые значения сенсоров берутся из
-профилей, определённых в app/forge_machines.py.
+профилей и траектории агрегата (app/forge_machines.py, app/trajectory.py);
+само измерение не собирает — берёт его у module траектории.
 
 Запуск:
     python emulator/forge_stream.py
@@ -35,9 +36,8 @@ if str(_SPA_DIR) not in sys.path:
 from app.forge_machines import (  # noqa: E402
     FORGE_MACHINES,
     SEED_HISTORY_DAYS,
-    SENSOR_PROFILES,
-    generate_sensor_values,
 )
+from app.trajectory import measure, noise_source, to_ingest_payload  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,48 +54,10 @@ def _handle_stop(signum, frame):
     log.info("Получен сигнал прерывания, завершение потока...")
 
 
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
-def _generate_payload(machine, rng: random.Random, t: float) -> dict:
-    """Генерирует измерение, продолжающее траекторию деградации засева.
-
-    Аргумент ``t`` — прогресс деградации: живой поток стартует с t ≈ 1.0
-    (конец засеянного 14-дневного окна) и медленно растёт со временем, что
-    исключает разрыв прогнозов на стыке истории и потока. Сенсорные значения
-    берутся из общего источника app.forge_machines.generate_sensor_values.
-    """
-    profile = SENSOR_PROFILES[machine.state]
-    sensors = generate_sensor_values(machine, t, rng)
-
-    if machine.state == "pre_failure":
-        last_maint = profile["last_maintenance_days_ago"] + rng.randint(-2, 2)
-    else:
-        last_maint = profile["last_maintenance_days_ago"] + rng.randint(-1, 1)
-
-    return {
-        "machine_id": machine.machine_id,
-        "machine_type": machine.ml_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "operational_hours": round(machine.operational_hours + rng.uniform(0, 1), 1),
-        "temperature_c": sensors["temperature_c"],
-        "vibration_mms": sensors["vibration_mms"],
-        "sound_db": sensors["sound_db"],
-        "oil_level_pct": sensors["oil_level_pct"],
-        "coolant_level_pct": sensors["coolant_level_pct"],
-        "power_consumption_kw": sensors["power_consumption_kw"],
-        "last_maintenance_days_ago": int(_clamp(last_maint, 0, 365)),
-        "maintenance_history_count": machine.maintenance_history_count,
-        "failure_history_count": machine.failure_history_count,
-        "ai_supervision": True,
-        "error_codes_last_30_days": sensors["error_codes_last_30_days"],
-        "ai_override_events": sensors["ai_override_events"],
-        "laser_intensity": None,
-        "hydraulic_pressure_bar": None,
-        "coolant_flow_l_min": None,
-        "heat_index": None,
-    }
+def _payload(machine, rng: random.Random, t: float) -> dict:
+    """Измерение из module траектории в JSON формата /ingest."""
+    return to_ingest_payload(
+        measure(machine, t, datetime.now(timezone.utc), rng))
 
 
 def wait_for_server(url: str, timeout: int) -> bool:
@@ -116,8 +78,7 @@ def run_stream(api_url: str, auth: HTTPBasicAuth, cycle_seconds: float) -> None:
     session = requests.Session()
     n = len(FORGE_MACHINES)
     per_machine_delay = cycle_seconds / n
-    rngs = {m.machine_id: random.Random(abs(hash(m.machine_id)) % (2 ** 32))
-            for m in FORGE_MACHINES}
+    rngs = {m.machine_id: noise_source(m) for m in FORGE_MACHINES}
     stats = {"sent": 0, "processed": 0, "buffered": 0, "failed": 0}
     # Момент старта потока ≈ «сейчас» сидера: от него продолжается
     # траектория деградации (t стартует с 1.0 — конца засеянного окна).
@@ -132,7 +93,7 @@ def run_stream(api_url: str, auth: HTTPBasicAuth, cycle_seconds: float) -> None:
                 break
             window = min(SEED_HISTORY_DAYS, machine.history_days)
             t = 1.0 + elapsed_days / max(window, 1)
-            payload = _generate_payload(machine, rngs[machine.machine_id], t)
+            payload = _payload(machine, rngs[machine.machine_id], t)
             try:
                 resp = session.post(f"{api_url}/ingest",
                                     json=payload, auth=auth, timeout=10)
