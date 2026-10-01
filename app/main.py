@@ -22,6 +22,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .aggregate_status import STATUS_NEW, STATUS_NORMAL, STATUS_PRE_FAILURE, aggregate_status
 from .buffer import AggregationManager
 from .config import settings
 from .database import create_database
@@ -336,51 +337,43 @@ def latest_predictions(
 
 @app.get("/predictions/overview", tags=["query"])
 def predictions_overview(user: Annotated[str, Depends(authenticate)]) -> list[dict]:
-    """Все агрегаты с последним предсказанием (NULL у машин без предсказаний)."""
-    return app.state.db.all_machines_overview()
+    """Все агрегаты с последним предсказанием (NULL у машин без предсказаний)
+    и готовым статусом агрегата."""
+    return _overview_with_status()
+
+
+def _overview_with_status() -> list[dict]:
+    """Строки обзора с полем status — единый источник для таблицы цеха
+    и счётчиков дашборда."""
+    threshold = settings.FAILURE_THRESHOLD
+    rows = app.state.db.all_machines_overview()
+    for row in rows:
+        row["status"] = aggregate_status(
+            row.get("operational_hours"), row.get("failure_probability"), threshold
+        )
+    return rows
 
 
 @app.get("/dashboard/stats", tags=["query"])
 def dashboard_stats(user: Annotated[str, Depends(authenticate)]) -> dict:
     """Агрегированные показатели для дашборда: парк, статусы, категории, инциденты."""
     db = app.state.db
-    threshold = settings.FAILURE_THRESHOLD
 
-    equipment = db.list_equipment()
-    preds = db.all_machines_overview()
-    pred_by_id = {p["machine_id"]: p for p in preds if p.get("failure_probability") is not None}
-
+    rows = _overview_with_status()
     by_category: dict[str, int] = {}
-    pre_failure = 0
-    normal_count = 0
-    new_count = 0
-
-    for eq in equipment:
-        cat = eq.get("category") or "Прочее"
+    by_status = {STATUS_PRE_FAILURE: 0, STATUS_NORMAL: 0, STATUS_NEW: 0}
+    for row in rows:
+        cat = row.get("category") or "Прочее"
         by_category[cat] = by_category.get(cat, 0) + 1
-
-        if eq["operational_hours"] < 1000.0:
-            new_count += 1
-        elif eq["machine_id"] in pred_by_id:
-            p = pred_by_id[eq["machine_id"]]
-            if p["failure_probability"] >= threshold:
-                pre_failure += 1
-            else:
-                normal_count += 1
-        else:
-            new_count += 1
+        by_status[row["status"]] += 1
 
     summary = db.incidents_summary()
     alerts_sent = db.get_alerts_count()
 
     return {
-        "total": len(equipment),
+        "total": len(rows),
         "by_category": by_category,
-        "by_status": {
-            "pre_failure": pre_failure,
-            "normal": normal_count,
-            "new": new_count,
-        },
+        "by_status": by_status,
         "incidents_open": summary["open"],
         "incidents_total": summary["total"],
         "alerts_sent": alerts_sent,
@@ -483,15 +476,19 @@ def equipment_detail(
     user: Annotated[str, Depends(authenticate)],
 ) -> dict:
     """Метаданные единицы оборудования (наименование, тип, категория,
-    наработка) для карточки агрегата."""
-    eq_list = app.state.db.list_equipment()
-    eq = next((e for e in eq_list if e["machine_id"] == machine_id), None)
+    наработка, статус) для карточки агрегата. Неизвестный агрегат — «new»."""
+    db = app.state.db
+    eq = next((e for e in db.list_equipment() if e["machine_id"] == machine_id), None)
+    hours = (eq or {}).get("operational_hours", 0)
+    last = db.predictions_history(machine_id, limit=1)
+    probability = last[0]["failure_probability"] if last else None
     return {
         "machine_id": machine_id,
         "display_name": _MACHINE_DISPLAY_NAMES.get(machine_id, machine_id),
         "machine_type": (eq or {}).get("machine_type", ""),
         "category": (eq or {}).get("category", ""),
-        "operational_hours": (eq or {}).get("operational_hours", 0),
+        "operational_hours": hours,
+        "status": aggregate_status(hours, probability, settings.FAILURE_THRESHOLD),
     }
 
 

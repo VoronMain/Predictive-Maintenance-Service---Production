@@ -139,12 +139,7 @@
     }
     function visibleCols() { return COLS.filter((c) => visible.has(c.key)); }
 
-    function statusOf(row) {
-      if (row.failure_probability === null || row.failure_probability === undefined
-          || row.operational_hours < 1000) return "new";
-      if (row.failure_probability >= cfg.threshold) return "pre_failure";
-      return "normal";
-    }
+    function statusOf(row) { return row.status; }
     function statusLabel(s) {
       if (s === "pre_failure") return "Предаварийные";
       if (s === "new")         return "Новые";
