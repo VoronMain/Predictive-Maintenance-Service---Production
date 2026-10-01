@@ -29,6 +29,7 @@ from .database import create_database
 from .forge_machines import FORGE_MACHINES, SEED_HISTORY_DAYS
 from .incidents import IncidentDetector
 from .ml_service import MLService
+from .notification_settings import load_notification_settings
 from .notifications import NotificationService
 from .pipeline import Pipeline
 from .schema import EquipmentRecord, TelemetryMeasurement
@@ -500,7 +501,7 @@ def read_notification_settings(
     user: Annotated[str, Depends(authenticate)],
 ) -> dict:
     """Текущие настройки автоматических оповещений."""
-    return app.state.db.get_notification_settings()
+    return load_notification_settings(app.state.db)
 
 
 @app.put("/settings/notifications", tags=["settings"])

@@ -23,7 +23,7 @@ import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +38,24 @@ from .schema import (
 log = logging.getLogger(__name__)
 
 _DEFAULT_SEVERITY = "medium"
+
+
+def _utc_iso(value: datetime) -> str:
+    """Метка времени для записи: ISO 8601 в UTC (+00:00).
+
+    Контракт хранилища отдаёт все метки времени в UTC. Значения хранятся
+    текстом, поэтому приведение выполняется при записи: иначе сортировка по
+    тексту ломалась бы на метках с разным смещением. Метка без часового
+    пояса трактуется как UTC.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _clean_features(features: dict) -> dict:
+    """NaN → None: в JSON NaN недопустим (так же поступает бэкенд PostgreSQL)."""
+    return {k: (None if v != v else v) for k, v in features.items()}
 
 
 SCHEMA_DDL = """
@@ -185,7 +203,7 @@ class SQLiteDatabase:
                 log.info("Миграция: добавлен столбец %s.%s", table, column)
 
     @contextmanager
-    def transaction(self):
+    def _transaction(self):
         with self._lock:
             try:
                 yield self._conn
@@ -196,7 +214,7 @@ class SQLiteDatabase:
 
     # ===== Equipment =====
     def upsert_equipment(self, record: EquipmentRecord) -> None:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO equipment(machine_id, machine_type, operational_hours, category) "
                 "VALUES (?, ?, ?, ?) "
@@ -225,8 +243,7 @@ class SQLiteDatabase:
 
     def get_sensor_averages(self, machine_id: str, days: int = 7) -> dict:
         """Средние значения шести сенсоров за последние N дней из сырых измерений."""
-        from datetime import datetime, timedelta, timezone
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = _utc_iso(datetime.now(timezone.utc) - timedelta(days=days))
         with self._lock:
             cur = self._conn.execute(
                 """
@@ -292,9 +309,11 @@ class SQLiteDatabase:
             return [dict(row) for row in cur.fetchall()]
 
     # ===== Настройки оповещений (профиль инспектора БППР) =====
-    def get_notification_settings(self) -> dict:
-        """Возвращает текущие настройки оповещений. При отсутствии записи
-        формирует значения по умолчанию из конфигурации приложения."""
+    def get_notification_settings(self) -> Optional[dict]:
+        """Сохранённые настройки оповещений или None, если их ещё не сохраняли.
+
+        Значения по умолчанию adapter не знает — их подставляет
+        app.notification_settings.load_notification_settings."""
         with self._lock:
             cur = self._conn.execute(
                 "SELECT email_enabled, sms_enabled, push_enabled, email, phone, "
@@ -302,30 +321,19 @@ class SQLiteDatabase:
             )
             row = cur.fetchone()
         if row is None:
-            return {
-                "email_enabled": True,
-                "sms_enabled": False,
-                "push_enabled": False,
-                "email": settings.SMTP_TO,
-                "phone": "",
-                "failure_threshold": settings.FAILURE_THRESHOLD,
-                "updated_at": None,
-            }
+            return None
         d = dict(row)
         d["email_enabled"] = bool(d["email_enabled"])
         d["sms_enabled"] = bool(d["sms_enabled"])
         d["push_enabled"] = bool(d["push_enabled"])
-        if d.get("failure_threshold") is None:
-            d["failure_threshold"] = settings.FAILURE_THRESHOLD
         return d
 
     def save_notification_settings(self, *, email_enabled: bool, sms_enabled: bool,
                                    push_enabled: bool, email: str, phone: str,
                                    failure_threshold: float) -> dict:
         """Сохраняет настройки оповещений (единственная строка id=1)."""
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        with self.transaction() as conn:
+        now = _utc_iso(datetime.now(timezone.utc))
+        with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO notification_settings(id, email_enabled, sms_enabled, "
                 "push_enabled, email, phone, failure_threshold, updated_at) "
@@ -351,34 +359,42 @@ class SQLiteDatabase:
 
         Формат строк совпадает с поштучными insert_raw_measurement,
         insert_prediction и insert_hourly_aggregate живого потока.
+        Идемпотентна по (агрегат, время): точка, которая уже есть в базе,
+        повторно не записывается.
         """
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             conn.executemany(
-                "INSERT OR IGNORE INTO telemetry_raw(machine_id, timestamp, payload) "
-                "VALUES (?, ?, ?)",
+                "INSERT INTO telemetry_raw(machine_id, timestamp, payload) "
+                "SELECT ?, ?, ? WHERE NOT EXISTS ("
+                "SELECT 1 FROM telemetry_raw WHERE machine_id = ? AND timestamp = ?)",
                 [
-                    (m.machine_id, m.timestamp.isoformat(),
-                     json.dumps(m.model_dump(mode="json"), ensure_ascii=False))
+                    (m.machine_id, _utc_iso(m.timestamp),
+                     json.dumps(m.model_dump(mode="json"), ensure_ascii=False),
+                     m.machine_id, _utc_iso(m.timestamp))
                     for m in measurements
                 ],
             )
             conn.executemany(
-                "INSERT OR IGNORE INTO predictions"
+                "INSERT INTO predictions"
                 "(machine_id, timestamp, failure_probability, "
                 "failure_label, remaining_useful_life_days, threshold) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+                "SELECT 1 FROM predictions WHERE machine_id = ? AND timestamp = ?)",
                 [
-                    (p.machine_id, p.timestamp.isoformat(), p.failure_probability,
-                     p.failure_label, p.remaining_useful_life_days, p.threshold)
+                    (p.machine_id, _utc_iso(p.timestamp), p.failure_probability,
+                     p.failure_label, p.remaining_useful_life_days, p.threshold,
+                     p.machine_id, _utc_iso(p.timestamp))
                     for p in predictions
                 ],
             )
             conn.executemany(
                 "INSERT INTO telemetry_hourly(machine_id, window_end, features) "
-                "VALUES (?, ?, ?)",
+                "SELECT ?, ?, ? WHERE NOT EXISTS ("
+                "SELECT 1 FROM telemetry_hourly WHERE machine_id = ? AND window_end = ?)",
                 [
-                    (h.machine_id, h.window_end.isoformat(),
-                     json.dumps(h.features, ensure_ascii=False, default=float))
+                    (h.machine_id, _utc_iso(h.window_end),
+                     json.dumps(_clean_features(h.features), ensure_ascii=False),
+                     h.machine_id, _utc_iso(h.window_end))
                     for h in hourly_aggregates
                 ],
             )
@@ -386,13 +402,13 @@ class SQLiteDatabase:
     # ===== Raw telemetry =====
     def insert_raw_measurement(self, measurement: TelemetryMeasurement) -> None:
         payload = measurement.model_dump(mode="json")
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO telemetry_raw(machine_id, timestamp, payload) "
                 "VALUES (?, ?, ?)",
                 (
                     measurement.machine_id,
-                    measurement.timestamp.isoformat(),
+                    _utc_iso(measurement.timestamp),
                     json.dumps(payload, ensure_ascii=False),
                 ),
             )
@@ -406,32 +422,33 @@ class SQLiteDatabase:
             )
             rows = []
             for row in cur.fetchall():
-                rows.append({"timestamp": row["timestamp"], **json.loads(row["payload"])})
+                # Метка строки в UTC перекрывает метку из payload (исходное смещение).
+                rows.append({**json.loads(row["payload"]), "timestamp": row["timestamp"]})
             return rows
 
     # ===== Hourly aggregates =====
     def insert_hourly_aggregate(self, machine_id: str, window_end: datetime, features: dict) -> None:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO telemetry_hourly(machine_id, window_end, features) "
                 "VALUES (?, ?, ?)",
                 (
                     machine_id,
-                    window_end.isoformat(),
-                    json.dumps(features, ensure_ascii=False, default=float),
+                    _utc_iso(window_end),
+                    json.dumps(_clean_features(features), ensure_ascii=False, default=float),
                 ),
             )
 
     # ===== Predictions =====
     def insert_prediction(self, record: PredictionRecord) -> None:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             conn.execute(
                 "INSERT INTO predictions(machine_id, timestamp, failure_probability, "
                 "failure_label, remaining_useful_life_days, threshold) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     record.machine_id,
-                    record.timestamp.isoformat(),
+                    _utc_iso(record.timestamp),
                     record.failure_probability,
                     record.failure_label,
                     record.remaining_useful_life_days,
@@ -451,20 +468,6 @@ class SQLiteDatabase:
             )
             return [dict(row) for row in cur.fetchall()]
 
-    def latest_prediction_per_machine(self) -> list[dict]:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT p.machine_id, p.timestamp, p.failure_probability, "
-                "p.failure_label, p.remaining_useful_life_days, p.threshold, "
-                "e.machine_type, e.operational_hours, e.category FROM predictions p "
-                "JOIN (SELECT machine_id, MAX(timestamp) AS ts FROM predictions "
-                "GROUP BY machine_id) last "
-                "ON last.machine_id = p.machine_id AND last.ts = p.timestamp "
-                "LEFT JOIN equipment e ON e.machine_id = p.machine_id "
-                "ORDER BY p.failure_probability DESC"
-            )
-            return [dict(row) for row in cur.fetchall()]
-
     def predictions_history(self, machine_id: str, limit: int = 200) -> list[dict]:
         with self._lock:
             cur = self._conn.execute(
@@ -474,22 +477,6 @@ class SQLiteDatabase:
                 (machine_id, limit),
             )
             return [dict(row) for row in cur.fetchall()]
-
-    # ===== Retention =====
-    def apply_retention_policy(self, raw_retention_days: int = 30,
-                                aggregated_retention_days: int = 365 * 5) -> None:
-        """Удаляет устаревшие записи (резервный бэкенд SQLite).
-
-        В производственном бэкенде PostgreSQL/TimescaleDB ретенция
-        реализована штатными политиками add_retention_policy.
-        """
-        now = datetime.utcnow()
-        raw_cutoff = (now - timedelta(days=raw_retention_days)).isoformat()
-        agg_cutoff = (now - timedelta(days=aggregated_retention_days)).isoformat()
-        with self.transaction() as conn:
-            conn.execute("DELETE FROM telemetry_raw WHERE timestamp < ?", (raw_cutoff,))
-            conn.execute("DELETE FROM telemetry_hourly WHERE window_end < ?", (agg_cutoff,))
-            conn.execute("DELETE FROM predictions WHERE timestamp < ?", (agg_cutoff,))
 
     # ===== Incidents log =====
     def get_open_incident(self, machine_id: str) -> Optional[dict]:
@@ -505,13 +492,13 @@ class SQLiteDatabase:
     def open_incident(self, machine_id: str, opened_at: datetime,
                       probability: float, rul_days: float, threshold: float,
                       severity: str = _DEFAULT_SEVERITY) -> int:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             cur = conn.execute(
                 "INSERT INTO incidents_log(machine_id, opened_at, opened_probability, "
                 "opened_rul_days, peak_probability, min_rul_days, threshold, "
                 "severity, peak_severity, status) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
-                (machine_id, opened_at.isoformat(), probability, rul_days,
+                (machine_id, _utc_iso(opened_at), probability, rul_days,
                  probability, rul_days, threshold, severity, severity),
             )
             return int(cur.lastrowid)
@@ -519,7 +506,7 @@ class SQLiteDatabase:
     def update_open_incident(self, incident_id: int, probability: float,
                              rul_days: float,
                              peak_severity: str = _DEFAULT_SEVERITY) -> None:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             conn.execute(
                 "UPDATE incidents_log SET peak_probability=MAX(peak_probability, ?), "
                 "min_rul_days=MIN(min_rul_days, ?), peak_severity=? WHERE id=?",
@@ -527,16 +514,14 @@ class SQLiteDatabase:
             )
 
     def close_incident(self, incident_id: int, closed_at: datetime) -> None:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             conn.execute(
                 "UPDATE incidents_log SET status='closed', closed_at=? WHERE id=?",
-                (closed_at.isoformat(), incident_id),
+                (_utc_iso(closed_at), incident_id),
             )
 
     def list_incidents(self, status: Optional[str] = None,
                        machine_type: Optional[str] = None,
-                       date_from: Optional[datetime] = None,
-                       date_to: Optional[datetime] = None,
                        limit: int = 200) -> list[dict]:
         query = (
             "SELECT i.id, i.machine_id, e.machine_type, i.opened_at, "
@@ -551,10 +536,6 @@ class SQLiteDatabase:
             query += " AND i.status = ?"; params.append(status)
         if machine_type:
             query += " AND e.machine_type = ?"; params.append(machine_type)
-        if date_from:
-            query += " AND i.opened_at >= ?"; params.append(date_from.isoformat())
-        if date_to:
-            query += " AND i.opened_at <= ?"; params.append(date_to.isoformat())
         query += " ORDER BY i.opened_at DESC LIMIT ?"
         params.append(limit)
         with self._lock:
@@ -599,13 +580,13 @@ class SQLiteDatabase:
                      group_key: Optional[str] = None,
                      grouped_count: int = 1,
                      error: Optional[str] = None) -> int:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             cur = conn.execute(
                 "INSERT INTO alerts_log(incident_id, machine_id, sent_at, recipient, "
                 "subject, body, channel, severity, group_key, grouped_count, "
                 "status, error) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (incident_id, machine_id, sent_at.isoformat(), recipient,
+                (incident_id, machine_id, _utc_iso(sent_at), recipient,
                  subject, body, channel, severity, group_key, grouped_count,
                  status, error),
             )

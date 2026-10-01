@@ -14,21 +14,22 @@ testcontainers поднимается обычный PostgreSQL без расш�
     схемы (_initialize_schema) проходит до конца, наружу ничего не летит;
   * флаг self.timescaledb_available выставлен в False, расширение в БД
     действительно отсутствует;
+  * повторная инициализация на той же БД идемпотентна;
   * таблицы временных рядов telemetry_raw / telemetry_hourly / predictions
     созданы как обычные таблицы, а не гипертаблицы (нет схемы
-    _timescaledb_catalog, relkind = 'r');
-  * базовые операции чтения-записи работают: upsert оборудования, запись и
-    чтение предсказаний, пакетный засев, агрегатные выборки.
+    _timescaledb_catalog, relkind = 'r').
+
+Здесь только то, что специфично для PostgreSQL. Чтение и запись данных
+(в том числе на базе без TimescaleDB) проверяются контрактным набором
+tests/storage_contract_test.py — он идёт на обычном PostgreSQL именно так.
 
 Тест требует Docker. При его отсутствии (нет пакета testcontainers, не
-запущен демон Docker) модуль пропускается целиком — по тому же принципу
-мягкого скипа, что и остальные внешние интеграционные проверки.
+запущен демон Docker) фикстура pg_dsn (tests/conftest.py) пропускает тесты
+с причиной; в CI SPA_REQUIRE_PG_TESTS=1 превращает пропуск в ошибку.
 """
 from __future__ import annotations
 
-import re
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -37,58 +38,10 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# Нет пакета testcontainers — пропускаем весь модуль.
-_pg = pytest.importorskip(
-    "testcontainers.postgres",
-    reason="testcontainers не установлен — интеграционный тест PostgreSQL пропущен",
-)
-PostgresContainer = _pg.PostgresContainer
-
-from app.schema import (  # noqa: E402
-    EquipmentRecord,
-    HourlyAggregateRecord,
-    PredictionRecord,
-    TelemetryMeasurement,
-)
-
-# Обычный PostgreSQL — заведомо без расширения TimescaleDB.
-_IMAGE = "postgres:16-alpine"
-
-
-def _libpq_dsn(container: "PostgresContainer") -> str:
-    """URL от testcontainers → строка подключения в формате psycopg/libpq.
-
-    get_connection_url() отдаёт SQLAlchemy-URL вида
-    postgresql+psycopg2://user:pass@host:port/db; psycopg3 понимает
-    postgresql://, поэтому суффикс драйвера убираем.
-    """
-    url = container.get_connection_url()
-    return re.sub(r"^postgresql\+[a-z0-9]+://", "postgresql://", url)
-
-
-@pytest.fixture(scope="module")
-def pg_dsn():
-    """Поднимает обычный PostgreSQL в контейнере и отдаёт DSN.
-
-    Если Docker недоступен (демон не запущен, нет прав, нет самого
-    Docker) — контейнер не стартует, и модуль мягко пропускается.
-    """
-    try:
-        container = PostgresContainer(_IMAGE)
-        container.start()
-    except Exception as exc:  # noqa: BLE001 — любую ошибку старта трактуем как «нет Docker»
-        pytest.skip(f"Docker недоступен — тест деградации PostgreSQL пропущен: {exc}")
-        return
-
-    try:
-        yield _libpq_dsn(container)
-    finally:
-        container.stop()
-
 
 @pytest.fixture()
 def db(pg_dsn):
-    """Свежий PostgresDatabase на «голом» PostgreSQL для CRUD-проверок."""
+    """Свежий PostgresDatabase на «голом» PostgreSQL."""
     from app.pg_database import PostgresDatabase
 
     instance = PostgresDatabase(pg_dsn)
@@ -98,9 +51,6 @@ def db(pg_dsn):
         instance.close()
 
 
-# --------------------------------------------------------------- #
-# Конструирование и инициализация схемы без TimescaleDB
-# --------------------------------------------------------------- #
 def test_constructs_without_timescaledb(pg_dsn):
     """PostgresDatabase(dsn) на PostgreSQL без расширения:
     конструктор отрабатывает, схема инициализируется, исключение наружу
@@ -151,188 +101,3 @@ def test_no_timescaledb_catalog_schema(db):
             "WHERE schema_name = '_timescaledb_catalog'"
         )
         assert cur.fetchone()["n"] == 0
-
-
-def test_retention_policy_call_is_noop_without_timescaledb(db):
-    """apply_retention_policy на обычном PostgreSQL — тихий no-op,
-    обращения к несуществующему timescaledb_information.jobs нет."""
-    db.apply_retention_policy()  # не должно бросать
-
-
-# --------------------------------------------------------------- #
-# Базовые операции чтения-записи
-# --------------------------------------------------------------- #
-def _measurement(machine_id: str, ts: datetime, **over) -> TelemetryMeasurement:
-    payload = dict(
-        machine_id=machine_id,
-        machine_type="Furnace",
-        timestamp=ts,
-        operational_hours=1234.0,
-        temperature_c=61.0,
-        vibration_mms=11.0,
-        sound_db=92.0,
-        oil_level_pct=64.0,
-        coolant_level_pct=71.0,
-        power_consumption_kw=270.0,
-        last_maintenance_days_ago=10,
-        maintenance_history_count=6,
-        failure_history_count=0,
-        ai_supervision=True,
-        error_codes_last_30_days=2,
-        ai_override_events=1,
-    )
-    payload.update(over)
-    return TelemetryMeasurement(**payload)
-
-
-def test_equipment_upsert_and_list(db):
-    db.upsert_equipment(EquipmentRecord(
-        machine_id="M-1", machine_type="Furnace",
-        operational_hours=100.0, category="печи",
-    ))
-    db.upsert_equipment(EquipmentRecord(
-        machine_id="M-2", machine_type="Boiler",
-        operational_hours=200.0, category="котлы",
-    ))
-    # Повторный upsert обновляет запись, дубля не создаёт.
-    db.upsert_equipment(EquipmentRecord(
-        machine_id="M-1", machine_type="Furnace",
-        operational_hours=150.0, category="печи",
-    ))
-
-    rows = db.list_equipment()
-    by_id = {r["machine_id"]: r for r in rows}
-    assert set(by_id) == {"M-1", "M-2"}
-    assert by_id["M-1"]["operational_hours"] == 150.0
-
-
-def test_raw_measurement_write_and_read(db):
-    db.upsert_equipment(EquipmentRecord(machine_id="M-10", machine_type="Furnace"))
-    now = datetime.now(timezone.utc)
-    db.insert_raw_measurement(_measurement("M-10", now - timedelta(minutes=5)))
-    db.insert_raw_measurement(_measurement("M-10", now, temperature_c=70.0))
-
-    rows = db.latest_raw_measurements("M-10", limit=10)
-    assert len(rows) == 2
-    # Свежайшее измерение первым, метка времени — строка ISO 8601.
-    assert rows[0]["temperature_c"] == 70.0
-    datetime.fromisoformat(rows[0]["timestamp"])
-
-
-def test_prediction_write_and_read(db):
-    db.upsert_equipment(EquipmentRecord(machine_id="M-20", machine_type="Furnace"))
-    now = datetime.now(timezone.utc)
-    for i, prob in enumerate((0.1, 0.4, 0.7)):
-        db.insert_prediction(PredictionRecord(
-            machine_id="M-20",
-            timestamp=now - timedelta(hours=2 - i),
-            failure_probability=prob,
-            failure_label=int(prob >= 0.33),
-            remaining_useful_life_days=30.0 - i,
-            threshold=0.33,
-        ))
-
-    assert db.has_predictions() is True
-
-    latest = db.latest_predictions(limit=10)
-    assert [p["failure_probability"] for p in latest] == [0.7, 0.4, 0.1]
-    assert latest[0]["machine_type"] == "Furnace"
-
-    history = db.predictions_history("M-20", limit=10)
-    assert len(history) == 3
-
-    per_machine = db.latest_prediction_per_machine()
-    assert per_machine[0]["machine_id"] == "M-20"
-    assert per_machine[0]["failure_probability"] == 0.7
-
-
-def test_insert_history_and_aggregate_reads(db):
-    db.upsert_equipment(EquipmentRecord(machine_id="M-30", machine_type="Furnace"))
-    now = datetime.now(timezone.utc)
-    measurements = [
-        TelemetryMeasurement(
-            machine_id="M-30", machine_type="Furnace",
-            timestamp=now - timedelta(hours=h), operational_hours=1000,
-            temperature_c=60 + h, vibration_mms=10, sound_db=90,
-            oil_level_pct=60, coolant_level_pct=70, power_consumption_kw=250,
-            last_maintenance_days_ago=10, maintenance_history_count=1,
-            failure_history_count=0, ai_supervision=True,
-            error_codes_last_30_days=0, ai_override_events=0,
-        )
-        for h in range(3)
-    ]
-    predictions = [
-        PredictionRecord(
-            machine_id="M-30", timestamp=now - timedelta(hours=h),
-            failure_probability=0.2 + 0.1 * h, failure_label=0,
-            remaining_useful_life_days=25.0, threshold=0.33,
-        )
-        for h in range(3)
-    ]
-    hourly = [
-        HourlyAggregateRecord(
-            machine_id="M-30", window_end=now - timedelta(hours=h),
-            features={"temperature_c_mean": 60.0 + h,
-                      "vibration_mms_mean": float("nan")},
-        )
-        for h in range(3)
-    ]
-    db.insert_history(measurements, predictions, hourly)
-
-    averages = db.get_sensor_averages("M-30", days=7)
-    assert averages["temperature_c"] == pytest.approx(61.0, abs=0.01)
-
-    overview = db.all_machines_overview()
-    m30 = next(r for r in overview if r["machine_id"] == "M-30")
-    # Свежайшая запись (h=0): предсказание 0.2, температура 60.
-    assert m30["failure_probability"] == pytest.approx(0.2)
-    assert m30["temperature_c"] == pytest.approx(60.0)
-
-    with db._conn.cursor() as cur:
-        cur.execute("SELECT features FROM telemetry_hourly WHERE machine_id = 'M-30'")
-        rows = cur.fetchall()
-    assert len(rows) == 3
-    assert all(r["features"]["vibration_mms_mean"] is None for r in rows)  # NaN → None
-
-
-def test_hourly_aggregate_write(db):
-    db.upsert_equipment(EquipmentRecord(machine_id="M-40", machine_type="Furnace"))
-    window_end = datetime.now(timezone.utc)
-    db.insert_hourly_aggregate("M-40", window_end, {"temperature_c_mean": 61.5,
-                                                    "vibration_mms_mean": float("nan")})
-    with db._conn.cursor() as cur:
-        cur.execute("SELECT features FROM telemetry_hourly WHERE machine_id = 'M-40'")
-        row = cur.fetchone()
-    assert row["features"]["temperature_c_mean"] == 61.5
-    assert row["features"]["vibration_mms_mean"] is None  # NaN → None
-
-
-def test_incident_lifecycle(db):
-    db.upsert_equipment(EquipmentRecord(machine_id="M-50", machine_type="Furnace"))
-    now = datetime.now(timezone.utc)
-    incident_id = db.open_incident("M-50", now, 0.5, 12.0, 0.33, severity="high")
-    assert db.get_open_incident("M-50")["id"] == incident_id
-
-    db.update_open_incident(incident_id, 0.8, 6.0, peak_severity="critical")
-    db.close_incident(incident_id, now + timedelta(hours=1))
-    assert db.get_open_incident("M-50") is None
-
-    summary = db.incidents_summary()
-    assert summary["total"] == 1
-    assert summary["closed"] == 1
-
-    incidents = db.list_incidents(machine_type="Furnace")
-    assert incidents[0]["peak_probability"] == 0.8
-
-
-def test_notification_settings_roundtrip(db):
-    saved = db.save_notification_settings(
-        email_enabled=True, sms_enabled=True, push_enabled=False,
-        email="ops@example.local", phone="+70000000000", failure_threshold=0.42,
-    )
-    assert saved["sms_enabled"] is True
-    assert saved["failure_threshold"] == 0.42
-
-    again = db.get_notification_settings()
-    assert again["email"] == "ops@example.local"
-    assert again["failure_threshold"] == 0.42

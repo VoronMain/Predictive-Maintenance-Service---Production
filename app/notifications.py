@@ -43,6 +43,7 @@ from typing import Callable, Optional
 from . import charts, email_render
 from .config import settings
 from .db_base import DatabaseProtocol
+from .notification_settings import default_notification_settings, load_notification_settings
 from .schema import PredictionRecord
 from .severity import (
     Severity,
@@ -254,14 +255,10 @@ class NotificationService:
         При недоступности настроек применяется резервная конфигурация:
         включён только email на адрес из параметров приложения."""
         try:
-            return self.db.get_notification_settings()
+            return load_notification_settings(self.db)
         except Exception:
             log.exception("Не удалось прочитать настройки оповещений")
-            return {
-                "email_enabled": True, "sms_enabled": False, "push_enabled": False,
-                "email": self.recipient, "phone": "",
-                "failure_threshold": settings.FAILURE_THRESHOLD,
-            }
+            return default_notification_settings(email=self.recipient)
 
     @classmethod
     def from_settings(cls, db: DatabaseProtocol) -> "NotificationService":
