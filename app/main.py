@@ -23,12 +23,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .aggregate_status import STATUS_NEW, STATUS_NORMAL, STATUS_PRE_FAILURE, aggregate_status
-from .buffer import AggregationManager
+from .feature_window import FeatureWindow
 from .config import settings
 from .database import create_database
 from .forge_machines import FORGE_MACHINES, SEED_HISTORY_DAYS
 from .incidents import IncidentDetector
 from .ml_service import MLService
+from .notification_settings import load_notification_settings
 from .notifications import NotificationService
 from .pipeline import Pipeline
 from .schema import EquipmentRecord, TelemetryMeasurement
@@ -129,7 +130,7 @@ async def lifespan(app: FastAPI):
         settings.MODELS_DIR, threshold=settings.FAILURE_THRESHOLD
     )
 
-    aggregator = AggregationManager(window_seconds=settings.AGGREGATION_WINDOW_SECONDS)
+    window = FeatureWindow(window_seconds=settings.AGGREGATION_WINDOW_SECONDS)
 
     log.info("Инициализация подсистемы оповещений (режим=%s)",
              settings.SMTP_MODE)
@@ -138,7 +139,7 @@ async def lifespan(app: FastAPI):
 
     pipeline = Pipeline(
         db=db,
-        aggregator=aggregator,
+        window=window,
         ml_service=ml,
         incident_detector=incidents,
         notifier=notifier,
@@ -157,7 +158,7 @@ async def lifespan(app: FastAPI):
 
     app.state.db = db
     app.state.ml = ml
-    app.state.aggregator = aggregator
+    app.state.window = window
     app.state.incidents = incidents
     app.state.notifier = notifier
     app.state.pipeline = pipeline
@@ -500,7 +501,7 @@ def read_notification_settings(
     user: Annotated[str, Depends(authenticate)],
 ) -> dict:
     """Текущие настройки автоматических оповещений."""
-    return app.state.db.get_notification_settings()
+    return load_notification_settings(app.state.db)
 
 
 @app.put("/settings/notifications", tags=["settings"])

@@ -28,16 +28,19 @@ SQLite (модуль app/database.py), и предназначен для зам
 
 При недоступном TimescaleDB перечисленные выше шаги — no-op: логическая
 схема таблиц не меняется, гипертаблицы и политики просто не создаются.
+Ручного вызова ретенции приложение не делает: удаление устаревших данных —
+дело политик TimescaleDB.
 
-Метки времени во всех методах возвращаются в виде строк ISO 8601, что
-обеспечивает совместимость формата выдачи с резервным бэкендом SQLite.
+Метки времени во всех методах возвращаются строками ISO 8601 в UTC
+(+00:00) — так же, как у резервного бэкенда SQLite (контракт хранилища
+проверяется tests/storage_contract_test.py на обоих adapters).
 """
 from __future__ import annotations
 
 import logging
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import psycopg
@@ -168,12 +171,23 @@ CREATE TABLE IF NOT EXISTS notification_settings (
 
 
 def _iso(value) -> Optional[str]:
-    """Приводит метку времени к строке ISO 8601 для единообразия выдачи."""
+    """Приводит метку времени к строке ISO 8601 в UTC (+00:00).
+
+    PostgreSQL отдаёт timestamptz в часовом поясе сессии; контракт
+    хранилища требует UTC независимо от настроек сервера.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.isoformat()
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
     return str(value)
+
+
+def _clean_features(features: dict) -> dict:
+    """NaN → None: в JSON NaN недопустим."""
+    return {k: (None if v != v else v) for k, v in features.items()}
 
 
 class PostgresDatabase:
@@ -348,7 +362,7 @@ class PostgresDatabase:
                 log.warning("Политика TimescaleDB не применена: %s", exc)
 
     @contextmanager
-    def transaction(self):
+    def _transaction(self):
         with self._lock:
             try:
                 yield self._conn
@@ -361,7 +375,7 @@ class PostgresDatabase:
     # Equipment
     # ------------------------------------------------------------ #
     def upsert_equipment(self, record: EquipmentRecord) -> None:
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO equipment(machine_id, machine_type, operational_hours, category) "
@@ -389,7 +403,6 @@ class PostgresDatabase:
             return cur.fetchone()["n"] > 0
 
     def get_sensor_averages(self, machine_id: str, days: int = 7) -> dict:
-        from datetime import datetime, timedelta, timezone
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
@@ -453,7 +466,11 @@ class PostgresDatabase:
     # ------------------------------------------------------------ #
     # Настройки оповещений (профиль инспектора БППР)
     # ------------------------------------------------------------ #
-    def get_notification_settings(self) -> dict:
+    def get_notification_settings(self) -> Optional[dict]:
+        """Сохранённые настройки оповещений или None, если их ещё не сохраняли.
+
+        Значения по умолчанию adapter не знает — их подставляет
+        app.notification_settings.load_notification_settings."""
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
                 "SELECT email_enabled, sms_enabled, push_enabled, email, phone, "
@@ -461,29 +478,18 @@ class PostgresDatabase:
             )
             row = cur.fetchone()
         if row is None:
-            return {
-                "email_enabled": True,
-                "sms_enabled": False,
-                "push_enabled": False,
-                "email": settings.SMTP_TO,
-                "phone": "",
-                "failure_threshold": settings.FAILURE_THRESHOLD,
-                "updated_at": None,
-            }
+            return None
         row["email_enabled"] = bool(row["email_enabled"])
         row["sms_enabled"] = bool(row["sms_enabled"])
         row["push_enabled"] = bool(row["push_enabled"])
-        if row.get("failure_threshold") is None:
-            row["failure_threshold"] = settings.FAILURE_THRESHOLD
         row["updated_at"] = _iso(row.get("updated_at"))
         return row
 
     def save_notification_settings(self, *, email_enabled: bool, sms_enabled: bool,
                                    push_enabled: bool, email: str, phone: str,
                                    failure_threshold: float) -> dict:
-        from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
-        with self.transaction() as conn, conn.cursor() as cur:
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO notification_settings(id, email_enabled, sms_enabled, "
                 "push_enabled, email, phone, failure_threshold, updated_at) "
@@ -511,14 +517,18 @@ class PostgresDatabase:
 
         Формат строк совпадает с поштучными insert_raw_measurement,
         insert_prediction и insert_hourly_aggregate живого потока.
+        Идемпотентна по (агрегат, время): точка, которая уже есть в базе,
+        повторно не записывается.
         """
-        with self.transaction() as conn:
+        with self._transaction() as conn:
             with conn.cursor() as cur:
                 cur.executemany(
                     "INSERT INTO telemetry_raw(machine_id, ts, payload) "
-                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    "SELECT %s, %s::timestamptz, %s::jsonb WHERE NOT EXISTS ("
+                    "SELECT 1 FROM telemetry_raw WHERE machine_id = %s AND ts = %s::timestamptz)",
                     [
-                        (m.machine_id, m.timestamp, Json(m.model_dump(mode="json")))
+                        (m.machine_id, m.timestamp, Json(m.model_dump(mode="json")),
+                         m.machine_id, m.timestamp)
                         for m in measurements
                     ],
                 )
@@ -526,20 +536,23 @@ class PostgresDatabase:
                     "INSERT INTO predictions"
                     "(machine_id, ts, failure_probability, "
                     "failure_label, remaining_useful_life_days, threshold) "
-                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    "SELECT %s, %s::timestamptz, %s, %s, %s, %s WHERE NOT EXISTS ("
+                    "SELECT 1 FROM predictions WHERE machine_id = %s AND ts = %s::timestamptz)",
                     [
                         (p.machine_id, p.timestamp, p.failure_probability,
-                         p.failure_label, p.remaining_useful_life_days, p.threshold)
+                         p.failure_label, p.remaining_useful_life_days, p.threshold,
+                         p.machine_id, p.timestamp)
                         for p in predictions
                     ],
                 )
                 cur.executemany(
                     "INSERT INTO telemetry_hourly(machine_id, window_end, features) "
-                    "VALUES (%s, %s, %s)",
+                    "SELECT %s, %s::timestamptz, %s::jsonb WHERE NOT EXISTS ("
+                    "SELECT 1 FROM telemetry_hourly "
+                    "WHERE machine_id = %s AND window_end = %s::timestamptz)",
                     [
-                        (h.machine_id, h.window_end,
-                         Json({k: (None if v != v else v)  # NaN→None
-                               for k, v in h.features.items()}))
+                        (h.machine_id, h.window_end, Json(_clean_features(h.features)),
+                         h.machine_id, h.window_end)
                         for h in hourly_aggregates
                     ],
                 )
@@ -549,7 +562,7 @@ class PostgresDatabase:
     # ------------------------------------------------------------ #
     def insert_raw_measurement(self, measurement: TelemetryMeasurement) -> None:
         payload = measurement.model_dump(mode="json")
-        with self.transaction() as conn, conn.cursor() as cur:
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO telemetry_raw(machine_id, ts, payload) "
                 "VALUES (%s, %s, %s)",
@@ -566,7 +579,8 @@ class PostgresDatabase:
             rows = []
             for row in cur.fetchall():
                 payload = row["payload"] or {}
-                rows.append({"timestamp": _iso(row["ts"]), **payload})
+                # Метка строки в UTC перекрывает метку из payload (исходное смещение).
+                rows.append({**payload, "timestamp": _iso(row["ts"])})
             return rows
 
     # ------------------------------------------------------------ #
@@ -574,8 +588,8 @@ class PostgresDatabase:
     # ------------------------------------------------------------ #
     def insert_hourly_aggregate(self, machine_id: str, window_end: datetime,
                                 features: dict) -> None:
-        clean = {k: (None if v != v else v) for k, v in features.items()}  # NaN→None
-        with self.transaction() as conn, conn.cursor() as cur:
+        clean = _clean_features(features)
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO telemetry_hourly(machine_id, window_end, features) "
                 "VALUES (%s, %s, %s)",
@@ -586,7 +600,7 @@ class PostgresDatabase:
     # Predictions
     # ------------------------------------------------------------ #
     def insert_prediction(self, record: PredictionRecord) -> None:
-        with self.transaction() as conn, conn.cursor() as cur:
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO predictions(machine_id, ts, failure_probability, "
                 "failure_label, remaining_useful_life_days, threshold) "
@@ -608,21 +622,6 @@ class PostgresDatabase:
             )
             return [self._fix_ts(r) for r in cur.fetchall()]
 
-    def latest_prediction_per_machine(self) -> list[dict]:
-        with self._lock, self._conn.cursor() as cur:
-            cur.execute(
-                "SELECT DISTINCT ON (p.machine_id) p.machine_id, "
-                "p.ts AS timestamp, p.failure_probability, p.failure_label, "
-                "p.remaining_useful_life_days, p.threshold, e.machine_type, "
-                "e.operational_hours, e.category "
-                "FROM predictions p "
-                "LEFT JOIN equipment e ON e.machine_id = p.machine_id "
-                "ORDER BY p.machine_id, p.ts DESC"
-            )
-            rows = [self._fix_ts(r) for r in cur.fetchall()]
-        rows.sort(key=lambda r: r["failure_probability"], reverse=True)
-        return rows
-
     def predictions_history(self, machine_id: str, limit: int = 200) -> list[dict]:
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
@@ -638,36 +637,6 @@ class PostgresDatabase:
         if "timestamp" in row:
             row["timestamp"] = _iso(row["timestamp"])
         return row
-
-    # ------------------------------------------------------------ #
-    # Retention (политики TimescaleDB; ручной вызов не требуется)
-    # ------------------------------------------------------------ #
-    def apply_retention_policy(self, raw_retention_days: int = 30,
-                               aggregated_retention_days: int = 365 * 5) -> None:
-        """В производственном бэкенде ретенция выполняется фоновым
-        планировщиком TimescaleDB по зарегистрированным политикам.
-        Метод сохранён для совместимости интерфейса и инициирует
-        немедленный прогон заданий обслуживания.
-
-        Метод не входит в штатный путь стенда (нигде не вызывается из
-        рантайма приложения — ретенция там полагается на политики
-        TimescaleDB, зарегистрированные в _setup_policies), но вызывается
-        тем же охраняемым флагом на случай административного/ручного
-        использования: без TimescaleDB представления
-        timescaledb_information.jobs не существует, и попытка обратиться
-        к нему бессмысленна."""
-        if not self.timescaledb_available:
-            log.debug(
-                "Ручной прогон политики ретенции пропущен: "
-                "расширение TimescaleDB недоступно"
-            )
-            return
-        try:
-            with self.transaction() as conn, conn.cursor() as cur:
-                cur.execute("CALL run_job((SELECT job_id FROM timescaledb_information.jobs "
-                            "WHERE proc_name = 'policy_retention' LIMIT 1))")
-        except psycopg.Error as exc:
-            log.debug("Ручной прогон политики ретенции пропущен: %s", exc)
 
     # ------------------------------------------------------------ #
     # Incidents log
@@ -688,7 +657,7 @@ class PostgresDatabase:
     def open_incident(self, machine_id: str, opened_at: datetime,
                       probability: float, rul_days: float, threshold: float,
                       severity: str = _DEFAULT_SEVERITY) -> int:
-        with self.transaction() as conn, conn.cursor() as cur:
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO incidents_log(machine_id, opened_at, opened_probability, "
                 "opened_rul_days, peak_probability, min_rul_days, threshold, "
@@ -702,7 +671,7 @@ class PostgresDatabase:
     def update_open_incident(self, incident_id: int, probability: float,
                              rul_days: float,
                              peak_severity: str = _DEFAULT_SEVERITY) -> None:
-        with self.transaction() as conn, conn.cursor() as cur:
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE incidents_log SET peak_probability = GREATEST(peak_probability, %s), "
                 "min_rul_days = LEAST(min_rul_days, %s), peak_severity = %s WHERE id = %s",
@@ -710,7 +679,7 @@ class PostgresDatabase:
             )
 
     def close_incident(self, incident_id: int, closed_at: datetime) -> None:
-        with self.transaction() as conn, conn.cursor() as cur:
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE incidents_log SET status='closed', closed_at=%s WHERE id=%s",
                 (closed_at, incident_id),
@@ -718,8 +687,6 @@ class PostgresDatabase:
 
     def list_incidents(self, status: Optional[str] = None,
                        machine_type: Optional[str] = None,
-                       date_from: Optional[datetime] = None,
-                       date_to: Optional[datetime] = None,
                        limit: int = 200) -> list[dict]:
         query = (
             "SELECT i.id, i.machine_id, e.machine_type, i.opened_at, "
@@ -734,10 +701,6 @@ class PostgresDatabase:
             query += " AND i.status = %s"; params.append(status)
         if machine_type:
             query += " AND e.machine_type = %s"; params.append(machine_type)
-        if date_from:
-            query += " AND i.opened_at >= %s"; params.append(date_from)
-        if date_to:
-            query += " AND i.opened_at <= %s"; params.append(date_to)
         query += " ORDER BY i.opened_at DESC LIMIT %s"
         params.append(limit)
         with self._lock, self._conn.cursor() as cur:
@@ -838,7 +801,7 @@ class PostgresDatabase:
         """Записывает попытку доставки. members — состав сводного
         оповещения: [{machine_id, incident_id, event_time}], пишется в
         той же транзакции."""
-        with self.transaction() as conn, conn.cursor() as cur:
+        with self._transaction() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO alerts_log(incident_id, machine_id, sent_at, recipient, "
                 "subject, body, channel, severity, group_key, grouped_count, "
