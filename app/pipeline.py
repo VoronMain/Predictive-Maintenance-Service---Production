@@ -152,7 +152,7 @@ class Pipeline:
         # Окно истории — отдельное, но с теми же правилами: последнее
         # историческое измерение (метка «сейчас») не должно попасть в окно
         # первого живого измерения и исказить его признаки.
-        window = FeatureWindow(self.window.window_seconds, self.window.min_samples)
+        window = self.window.empty_copy()
         scored: list[TelemetryMeasurement] = []
         frames: list[pd.DataFrame] = []
         hourly: list[HourlyAggregateRecord] = []

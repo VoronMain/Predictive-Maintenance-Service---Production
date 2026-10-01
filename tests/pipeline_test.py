@@ -37,6 +37,7 @@ from app.incidents import IncidentDetector  # noqa: E402
 from app.ml_service import MLService  # noqa: E402
 from app.notifications import FileEmailTransport, NotificationService  # noqa: E402
 from app.pipeline import Pipeline  # noqa: E402
+from predictive_maintenance.schema import FEATURE_COLUMNS  # noqa: E402
 from app.schema import EquipmentRecord, TelemetryMeasurement  # noqa: E402
 from app.seeder import is_already_seeded, seed_historical_data  # noqa: E402
 
@@ -409,6 +410,7 @@ def test_present_mnar_sensor_is_window_mean_and_flagged(stand):
 
 
 def test_measurement_older_than_window_does_not_affect_vector(stand):
+    assert settings.AGGREGATION_WINDOW_SECONDS < 2 * 3600  # тест рассчитан на это
     old = _measurement("W-1", 10_000.0, 0)
     recent = _measurement("W-1", 30_000.0, 0).model_copy(update={
         "timestamp": _T0 + timedelta(hours=2)})
@@ -430,7 +432,7 @@ def test_vectors_of_live_stream_and_history_are_identical(stand, second_stand):
 
     got, want = stand.hourly("V-1"), second_stand.hourly("V-1")
     assert len(got) == len(want) == 3
-    assert all(len(v) == 67 for v in got)
+    assert all(list(v) == list(FEATURE_COLUMNS) for v in got)  # 67, порядок схемы
     assert got == want
 
 

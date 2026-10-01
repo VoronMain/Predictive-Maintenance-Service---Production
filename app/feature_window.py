@@ -41,8 +41,6 @@ MACHINE_TYPES = [c.removeprefix("mtype_") for c in FEATURE_COLUMNS
 # Контракт признаков обученной модели
 # ---------------------------------------------------------------------------
 
-DATASET_YEAR = 2040
-
 # Источника возраста агрегата в системе нет: ни в измерении, ни в справочнике
 # агрегатов (столбец года установки удалён намеренно), ни в эмуляторе. Пока
 # источник не появится, возраст для модели — «неизвестен» = 1 год. Это явное
@@ -51,20 +49,20 @@ DATASET_YEAR = 2040
 # Maintenance_Overdue считаются от этого значения.
 AGE_UNKNOWN_YEARS = 1
 
-# Медианы MNAR-признаков по обучающей выборке: подставляются, когда у
-# агрегата нет физического датчика (индикатор *_available при этом 0).
-MNAR_MEDIANS = {
-    "Laser_Intensity": 5000.0,
-    "Hydraulic_Pressure_bar": 150.0,
-    "Coolant_Flow_L_min": 40.0,
-    "Heat_Index": 70.0,
-}
-_MNAR_SENSORS = {
-    "Laser_Intensity": "laser_intensity",
-    "Hydraulic_Pressure_bar": "hydraulic_pressure_bar",
-    "Coolant_Flow_L_min": "coolant_flow_l_min",
-    "Heat_Index": "heat_index",
-}
+# MNAR-признаки: (признак модели, поле измерения, медиана по обучающей
+# выборке). Медиана подставляется, когда у агрегата нет физического
+# датчика (индикатор *_available при этом 0).
+MNAR_SENSORS = (
+    ("Laser_Intensity", "laser_intensity", 5000.0),
+    ("Hydraulic_Pressure_bar", "hydraulic_pressure_bar", 150.0),
+    ("Coolant_Flow_L_min", "coolant_flow_l_min", 40.0),
+    ("Heat_Index", "heat_index", 70.0),
+)
+
+# Календарные константы признаков: Error_Rate нормируется на наработку в
+# месяцах (720 ч), «дней с установки» = возраст в годах × 365.
+HOURS_PER_MONTH = 720
+DAYS_PER_YEAR = 365
 
 # Пороги производных признаков (feature engineering обучающего датасета).
 HIGH_VIBRATION_MMS = 20
@@ -75,7 +73,7 @@ LOW_COOLANT_PCT = 25
 OVERDUE_THRESHOLD = 1.5
 
 # Числовые поля измерения, по которым считаются средние окна.
-_NUMERIC_FIELDS = (
+_NUMERIC_FIELDS = tuple(field for _, field, _ in MNAR_SENSORS) + (
     "temperature_c",
     "vibration_mms",
     "sound_db",
@@ -86,10 +84,6 @@ _NUMERIC_FIELDS = (
     "last_maintenance_days_ago",
     "error_codes_last_30_days",
     "ai_override_events",
-    "laser_intensity",
-    "hydraulic_pressure_bar",
-    "coolant_flow_l_min",
-    "heat_index",
 )
 
 
@@ -100,6 +94,24 @@ class FeatureVector:
     features: pd.DataFrame  # одна строка, 67 признаков в порядке FEATURE_COLUMNS
     n_samples: int          # число измерений в окне
     window_end: datetime    # время последнего измерения окна
+
+
+class _MachineBuffer:
+    """Кольцевой буфер измерений одного агрегата со своей блокировкой."""
+
+    def __init__(self) -> None:
+        self._items: Deque[TelemetryMeasurement] = deque()
+        self._lock = threading.Lock()
+
+    def push(self, measurement: TelemetryMeasurement,
+             window: timedelta) -> list[TelemetryMeasurement]:
+        """Добавляет измерение, вытесняет устаревшие, возвращает окно."""
+        with self._lock:
+            self._items.append(measurement)
+            cutoff = measurement.timestamp - window
+            while self._items and self._items[0].timestamp < cutoff:
+                self._items.popleft()
+            return list(self._items)
 
 
 class FeatureWindow:
@@ -118,9 +130,12 @@ class FeatureWindow:
         self.window_seconds = window_seconds
         self.min_samples = min_samples
         self._window = timedelta(seconds=window_seconds)
-        self._buffers: Dict[str, Deque[TelemetryMeasurement]] = {}
-        self._locks: Dict[str, threading.Lock] = {}
+        self._buffers: Dict[str, _MachineBuffer] = {}
         self._registry_lock = threading.Lock()
+
+    def empty_copy(self) -> "FeatureWindow":
+        """Новое пустое окно с теми же параметрами (окно для истории)."""
+        return FeatureWindow(self.window_seconds, self.min_samples)
 
     def add(self, measurement: TelemetryMeasurement) -> Optional[FeatureVector]:
         """Принимает измерение; возвращает вектор признаков или None."""
@@ -134,19 +149,9 @@ class FeatureWindow:
         )
 
     def _push(self, measurement: TelemetryMeasurement) -> list[TelemetryMeasurement]:
-        machine_id = measurement.machine_id
         with self._registry_lock:
-            buf = self._buffers.get(machine_id)
-            if buf is None:
-                buf = self._buffers[machine_id] = deque()
-                self._locks[machine_id] = threading.Lock()
-            lock = self._locks[machine_id]
-        with lock:
-            buf.append(measurement)
-            cutoff = measurement.timestamp - self._window
-            while buf and buf[0].timestamp < cutoff:
-                buf.popleft()
-            return list(buf)
+            buf = self._buffers.setdefault(measurement.machine_id, _MachineBuffer())
+        return buf.push(measurement, self._window)
 
 
 def _window_means(items: list[TelemetryMeasurement]) -> dict[str, float]:
@@ -178,10 +183,10 @@ def _build_features(means: dict[str, float], last: TelemetryMeasurement) -> pd.D
     record["AI_Override_Events"] = means["ai_override_events"]
 
     # MNAR-признаки: нет датчика → медиана и индикатор наличия 0.
-    for feat, field in _MNAR_SENSORS.items():
+    for feat, field, median in MNAR_SENSORS:
         value = means[field]
         if _isnan(value):
-            record[feat] = MNAR_MEDIANS[feat]
+            record[feat] = median
             record[f"{feat}_available"] = 0
         else:
             record[feat] = float(value)
@@ -202,13 +207,13 @@ def _build_features(means: dict[str, float], last: TelemetryMeasurement) -> pd.D
         record["Failure_History_Count"] + 1
     )
     record["Error_Rate"] = record["Error_Codes_Last_30_Days"] / (
-        record["Operational_Hours"] / 720 + 1
+        record["Operational_Hours"] / HOURS_PER_MONTH + 1
     )
     record["High_Vibration"] = int(record["Vibration_mms"] > HIGH_VIBRATION_MMS)
     record["Low_Oil"] = int(record["Oil_Level_pct"] < LOW_OIL_PCT)
     record["High_Temperature"] = int(record["Temperature_C"] > HIGH_TEMPERATURE_C)
     record["Low_Coolant"] = int(record["Coolant_Level_pct"] < LOW_COOLANT_PCT)
-    record["Days_Since_Install"] = age_years * 365
+    record["Days_Since_Install"] = age_years * DAYS_PER_YEAR
     record["Maint_Freq_days"] = record["Days_Since_Install"] / (
         record["Maintenance_History_Count"] + 1
     )
