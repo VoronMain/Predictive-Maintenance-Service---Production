@@ -139,14 +139,13 @@
     }
     function visibleCols() { return COLS.filter((c) => visible.has(c.key)); }
 
-    function statusOf(row) { return row.status; }
     function statusLabel(s) {
       if (s === "pre_failure") return "Предаварийные";
       if (s === "new")         return "Новые";
       return "В норме";
     }
     function statusBadge(row) {
-      const s = statusOf(row);
+      const s = row.status;
       if (s === "pre_failure") return '<span class="badge badge-red"><span class="dot"></span>предаварийное</span>';
       if (s === "new")         return '<span class="badge badge-blue"><span class="dot"></span>новое</span>';
       return '<span class="badge badge-green"><span class="dot"></span>норма</span>';
@@ -205,7 +204,7 @@
         case "category": return row.category || row.machine_type || "";
         case "prob":     return num(row.failure_probability);
         case "rul":      return num(row.remaining_useful_life_days);
-        case "status":   return STATUS_RANK[statusOf(row)];
+        case "status":   return STATUS_RANK[row.status];
         case "hours":    return num(row.operational_hours);
         case "sensor":   return num(row[col.key]);
       }
@@ -350,7 +349,7 @@
       sorted.forEach((row) => {
         const key = groupByKey === "category"
           ? (row.category || row.machine_type || "—")
-          : statusLabel(statusOf(row));
+          : statusLabel(row.status);
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(row);
       });
