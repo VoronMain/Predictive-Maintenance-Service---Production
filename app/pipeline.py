@@ -3,10 +3,12 @@
 pipeline.py — оркестратор конвейера обработки данных СПА.
 
 Реализует слоистую организацию обработки: сбор → валидация →
-буферизация → агрегация → формирование признаков → ML-инференс →
-сохранение в базу данных → детектирование инцидентов и оповещения.
-Каждый этап вынесен в отдельный модуль, что обеспечивает независимое
-тестирование и наглядность пайплайна.
+окно признаков → ML-инференс → сохранение в базу данных →
+детектирование инцидентов и оповещения.
+Окно измерений и формирование вектора признаков — один модуль
+(app.feature_window), а не два этапа со словарём между ними; конвейер
+вызывает только его interface и проверяется целиком, через сохранённые
+вектор признаков и предсказания.
 """
 from __future__ import annotations
 
@@ -16,9 +18,8 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
-from .buffer import AggregationManager
 from .db_base import DatabaseProtocol
-from .features import build_feature_vector
+from .feature_window import FeatureWindow
 from .incidents import IncidentDetector, IncidentEvent
 from .ml_service import MLService
 from .notifications import NotificationService
@@ -45,18 +46,16 @@ class Pipeline:
     def __init__(
         self,
         db: DatabaseProtocol,
-        aggregator: AggregationManager,
+        window: FeatureWindow,
         ml_service: MLService,
         incident_detector: Optional[IncidentDetector] = None,
         notifier: Optional[NotificationService] = None,
-        min_samples_for_inference: int = 1,
     ) -> None:
         self.db = db
-        self.aggregator = aggregator
+        self.window = window
         self.ml = ml_service
         self.incidents = incident_detector
         self.notifier = notifier
-        self.min_samples_for_inference = min_samples_for_inference
 
     def ingest(self, measurement: TelemetryMeasurement) -> Optional[PredictionRecord]:
         """Обрабатывает одно входящее измерение и возвращает предикт.
@@ -77,26 +76,22 @@ class Pipeline:
         )
         # Сохранение сырого измерения.
         self.db.insert_raw_measurement(measurement)
-        # Помещение в кольцевой буфер.
-        self.aggregator.append(measurement)
-
-        # Формирование агрегата и вектора признаков.
-        aggregate = self.aggregator.aggregate(measurement.machine_id)
-        if aggregate is None or aggregate["n_samples"] < self.min_samples_for_inference:
+        # Окно признаков: вектор готов либо мало данных.
+        result = self.window.add(measurement)
+        if result is None:
             return None
 
-        features = build_feature_vector(aggregate)
         # Сохранение часового агрегата для последующего ретроспективного
         # анализа и мониторинга качества моделей.
         self.db.insert_hourly_aggregate(
             machine_id=measurement.machine_id,
-            window_end=aggregate["window_end"],
-            features=features.iloc[0].to_dict(),
+            window_end=result.window_end,
+            features=result.features.iloc[0].to_dict(),
         )
 
         # Запуск ML-инференса.
         prediction = self.ml.predict(
-            features=features,
+            features=result.features,
             machine_id=measurement.machine_id,
             timestamp=measurement.timestamp,
         )
@@ -157,22 +152,20 @@ class Pipeline:
         # Окно истории — отдельное, но с теми же правилами: последнее
         # историческое измерение (метка «сейчас») не должно попасть в окно
         # первого живого измерения и исказить его признаки.
-        aggregator = AggregationManager(self.aggregator.window_seconds)
+        window = self.window.empty_copy()
         scored: list[TelemetryMeasurement] = []
         frames: list[pd.DataFrame] = []
         hourly: list[HourlyAggregateRecord] = []
         for measurement in series:
-            aggregator.append(measurement)
-            aggregate = aggregator.aggregate(measurement.machine_id)
-            if aggregate is None or aggregate["n_samples"] < self.min_samples_for_inference:
+            result = window.add(measurement)
+            if result is None:
                 continue
-            features = build_feature_vector(aggregate)
             hourly.append(HourlyAggregateRecord(
                 machine_id=measurement.machine_id,
-                window_end=aggregate["window_end"],
-                features=features.iloc[0].to_dict(),
+                window_end=result.window_end,
+                features=result.features.iloc[0].to_dict(),
             ))
-            frames.append(features)
+            frames.append(result.features)
             scored.append(measurement)
 
         predictions: list[PredictionRecord] = []
