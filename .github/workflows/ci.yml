@@ -33,6 +33,11 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests
+        # На раннере есть Docker: PostgreSQL-часть контрактных тестов хранилища
+        # должна выполняться, а не пропускаться. SPA_REQUIRE_PG_TESTS=1
+        # превращает пропуск (нет Docker/testcontainers) в падение.
+        env:
+          SPA_REQUIRE_PG_TESTS: "1"
         run: pytest
 
   docker-build:
