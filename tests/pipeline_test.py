@@ -18,6 +18,7 @@ pipeline_test.py — тест единого пути оценки (issue #19).
 """
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,9 +29,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from app.buffer import AggregationManager  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import SQLiteDatabase  # noqa: E402
+from app.feature_window import FeatureWindow  # noqa: E402
 from app.forge_machines import FORGE_MACHINES  # noqa: E402
 from app.incidents import IncidentDetector  # noqa: E402
 from app.ml_service import MLService  # noqa: E402
@@ -55,7 +56,7 @@ def ml() -> MLService:
 class Stand:
     """Конвейер на чистом SQLite плюс подсистема оповещений (file-режим)."""
 
-    def __init__(self, ml: MLService, tmp: Path) -> None:
+    def __init__(self, ml: MLService, tmp: Path, min_samples: int = 1) -> None:
         self.db = SQLiteDatabase(tmp / "spa.db")
         self.notifier = NotificationService(
             db=self.db, transport=FileEmailTransport(tmp / "alerts"),
@@ -63,7 +64,7 @@ class Stand:
         )
         self.pipeline = Pipeline(
             db=self.db,
-            aggregator=AggregationManager(settings.AGGREGATION_WINDOW_SECONDS),
+            window=FeatureWindow(settings.AGGREGATION_WINDOW_SECONDS, min_samples),
             ml_service=ml,
             incident_detector=IncidentDetector(db=self.db),
             notifier=self.notifier,
@@ -87,6 +88,14 @@ class Stand:
     def predictions(self, machine_id: str) -> list[dict]:
         rows = self.db.predictions_history(machine_id, limit=1000)
         return sorted(rows, key=lambda r: r["timestamp"])
+
+    def hourly(self, machine_id: str) -> list[dict]:
+        """Сохранённые векторы признаков (часовые агрегаты), по времени."""
+        with self.db._lock:
+            rows = self.db._conn.execute(
+                "SELECT features FROM telemetry_hourly WHERE machine_id = ? "
+                "ORDER BY window_end", (machine_id,)).fetchall()
+        return [json.loads(r[0]) for r in rows]
 
     def alerts(self) -> list[dict]:
         self.notifier.flush_all()
@@ -336,3 +345,104 @@ def test_seeded_incidents_use_same_severity_rules_as_live(seeded):
         # Пик никогда не ниже степени открытия.
         rank = {"medium": 1, "high": 2, "critical": 3}
         assert rank[incident["peak_severity"]] >= rank[incident["severity"]]
+
+
+# ------------------------------------------------------ вектор признаков (issue #24)
+
+def _vector(stand: Stand, machine_id: str) -> dict:
+    """Последний сохранённый вектор признаков агрегата."""
+    return stand.hourly(machine_id)[-1]
+
+
+def test_age_features_use_explicit_unknown_age_of_one_year(stand):
+    # Возраст агрегата неизвестен → 1 год; поведение зафиксировано явно, чтобы
+    # будущая смена источника возраста была видна (issue #24).
+    m = _measurement("F-1", 36_500.0, 0)
+    stand.register(m)
+    stand.pipeline.ingest(m)
+
+    v = _vector(stand, "F-1")
+    assert v["Machine_Age_years"] == 1
+    assert v["Days_Since_Install"] == 365
+    assert v["Hours_per_Year"] == 36_500.0
+    # Maint_Freq_days = 365 / (3 + 1); просрочки нет: 30 < 1.5 * 91.25
+    assert v["Maint_Freq_days"] == pytest.approx(91.25)
+    assert v["Maintenance_Overdue"] == 0
+
+
+def test_maintenance_overdue_follows_threshold_of_one_and_a_half_intervals(stand):
+    fresh = _measurement("F-2", NORMAL, 0)
+    overdue = fresh.model_copy(update={"machine_id": "F-3",
+                                       "last_maintenance_days_ago": 140})
+    stand.register(fresh, overdue)
+    stand.pipeline.ingest(fresh)
+    stand.pipeline.ingest(overdue)
+
+    assert _vector(stand, "F-2")["Maintenance_Overdue"] == 0
+    # 140 > 1.5 * 91.25 = 136.9
+    assert _vector(stand, "F-3")["Maintenance_Overdue"] == 1
+
+
+def test_missing_mnar_sensor_is_filled_with_median_and_flagged(stand):
+    m = _measurement("M-1", NORMAL, 0)
+    stand.register(m)
+    stand.pipeline.ingest(m)
+
+    v = _vector(stand, "M-1")
+    assert (v["Laser_Intensity"], v["Laser_Intensity_available"]) == (5000.0, 0)
+    assert (v["Hydraulic_Pressure_bar"], v["Hydraulic_Pressure_bar_available"]) == (150.0, 0)
+    assert (v["Coolant_Flow_L_min"], v["Coolant_Flow_L_min_available"]) == (40.0, 0)
+    assert (v["Heat_Index"], v["Heat_Index_available"]) == (70.0, 0)
+
+
+def test_present_mnar_sensor_is_window_mean_and_flagged(stand):
+    first = _measurement("M-2", NORMAL, 0).model_copy(update={"laser_intensity": 4000.0})
+    second = _measurement("M-2", NORMAL, 0).model_copy(update={
+        "laser_intensity": 6000.0, "timestamp": _T0 + timedelta(minutes=10)})
+    stand.register(first)
+    stand.pipeline.ingest(first)
+    stand.pipeline.ingest(second)
+
+    v = _vector(stand, "M-2")
+    assert (v["Laser_Intensity"], v["Laser_Intensity_available"]) == (5000.0, 1)
+    assert v["Heat_Index_available"] == 0
+
+
+def test_measurement_older_than_window_does_not_affect_vector(stand):
+    old = _measurement("W-1", 10_000.0, 0)
+    recent = _measurement("W-1", 30_000.0, 0).model_copy(update={
+        "timestamp": _T0 + timedelta(hours=2)})
+    inside = _measurement("W-1", 50_000.0, 0).model_copy(update={
+        "timestamp": _T0 + timedelta(hours=2, minutes=10)})
+    stand.register(old)
+    for m in (old, recent, inside):
+        stand.pipeline.ingest(m)
+
+    # В окне только recent и inside: старое измерение на 2 ч за границей.
+    assert _vector(stand, "W-1")["Operational_Hours"] == 40_000.0
+
+
+def test_vectors_of_live_stream_and_history_are_identical(stand, second_stand):
+    ms = _series("V-1", [NORMAL, MEDIUM, HIGH])
+    stand.register(*ms)
+    stand.pipeline.ingest_history(ms)
+    _feed_one_by_one(second_stand, ms)
+
+    got, want = stand.hourly("V-1"), second_stand.hourly("V-1")
+    assert len(got) == len(want) == 3
+    assert all(len(v) == 67 for v in got)
+    assert got == want
+
+
+def test_too_few_samples_buffers_without_prediction_or_hourly(ml, tmp_path):
+    stand = Stand(ml, tmp_path, min_samples=3)
+    close = [_measurement("S-1", NORMAL, 0).model_copy(
+        update={"timestamp": _T0 + timedelta(minutes=10 * i)}) for i in range(3)]
+    stand.register(*close)
+
+    assert stand.pipeline.ingest(close[0]) is None
+    assert stand.pipeline.ingest(close[1]) is None
+    assert stand.predictions("S-1") == [] and stand.hourly("S-1") == []
+
+    assert stand.pipeline.ingest(close[2]) is not None
+    assert len(stand.predictions("S-1")) == len(stand.hourly("S-1")) == 1

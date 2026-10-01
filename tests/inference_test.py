@@ -12,6 +12,7 @@ PredictiveMaintenanceModel.predict_failure_proba поджимает резуль
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from app.features import build_feature_vector  # noqa: E402
+from app.feature_window import FeatureWindow  # noqa: E402
+from app.schema import TelemetryMeasurement  # noqa: E402
 from predictive_maintenance import PredictiveMaintenanceModel  # noqa: E402
 from predictive_maintenance.inference import PROBABILITY_EPSILON  # noqa: E402
 
@@ -42,30 +44,24 @@ def model() -> PredictiveMaintenanceModel:
     return PredictiveMaintenanceModel.load(_MODELS_DIR)
 
 
-def _aggregate(machine_type: str, operational_hours: float, **over) -> dict:
-    agg = dict(
-        machine_type=machine_type,
-        operational_hours_mean=operational_hours,
-        temperature_c_mean=60.0,
-        vibration_mms_mean=11.0,
-        sound_db_mean=93.0,
-        oil_level_pct_mean=65.0,
-        coolant_level_pct_mean=70.0,
-        power_consumption_kw_mean=270.0,
-        last_maintenance_days_ago_mean=30.0,
-        maintenance_history_count=6,
-        failure_history_count=0,
-        ai_supervision=1,
-        error_codes_last_30_days_mean=2.0,
-        ai_override_events_mean=1.0,
+def _features(machine_type: str, operational_hours: float):
+    """Вектор признаков из измерения — теми же путём, что и в конвейере."""
+    measurement = TelemetryMeasurement(
+        machine_id="T-1", machine_type=machine_type,
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        operational_hours=operational_hours,
+        temperature_c=60.0, vibration_mms=11.0, sound_db=93.0,
+        oil_level_pct=65.0, coolant_level_pct=70.0,
+        power_consumption_kw=270.0, last_maintenance_days_ago=30.0,
+        maintenance_history_count=6, failure_history_count=0,
+        ai_supervision=True, error_codes_last_30_days=2.0,
+        ai_override_events=1.0,
     )
-    agg.update(over)
-    return agg
+    return FeatureWindow(window_seconds=3600).add(measurement).features
 
 
-def _proba(model: PredictiveMaintenanceModel, **agg_kw) -> float:
-    frame = build_feature_vector(_aggregate(**agg_kw))
-    return float(model.predict_failure_proba(frame)[0])
+def _proba(model: PredictiveMaintenanceModel, **kw) -> float:
+    return float(model.predict_failure_proba(_features(**kw))[0])
 
 
 def test_healthy_equipment_probability_is_nonzero(model):
@@ -104,9 +100,7 @@ def test_probability_is_monotonic_in_operational_hours(model):
 
 def test_clip_does_not_move_label_across_threshold(model):
     """Поджатие на 1e-4 не должно менять бинарную метку по порогу t*."""
-    frame = build_feature_vector(
-        _aggregate(machine_type="Furnace", operational_hours=24_000.0)
-    )
+    frame = _features(machine_type="Furnace", operational_hours=24_000.0)
     failure = model.predict_failure(frame)
     assert failure.label[0] == 0
     assert 0.0 < failure.probability[0] < model.threshold
