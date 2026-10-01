@@ -5,27 +5,47 @@ notifications.py — подсистема оповещений с динамич
 
 Подсистема формирует и доставляет уведомления о предаварийных
 состояниях оборудования сотрудникам службы технического обслуживания
-и ремонта (ТОиР). По сравнению с базовой реализацией добавлены три
-механизма производственного контура:
+и ремонта (ТОиР). Она — единственный владелец решения «оповещать ли,
+когда и кого»: конвейер передаёт ей исход детектора инцидентов как
+есть (NotificationService.handle), а всю политику она применяет сама,
+по шагам:
 
-  * HTML-сообщения с вложениями. Письма формируются в формате
-    multipart/alternative (текстовая и HTML-версии) средствами шаблонов
-    Jinja2; в HTML-версию встраивается inline-график динамики (через
-    Content-ID), а сам график дополнительно прикладывается к письму
-    отдельным файлом.
-  * Динамическое подавление повторов. Окно подавления (cooldown)
-    зависит от степени критичности оповещения: чем выше критичность,
-    тем короче окно и тем чаще допускается повторное уведомление.
-  * Групповая агрегация однотипных оповещений. Оповещения, поступившие
-    в пределах окна агрегации и относящиеся к одному ключу группировки
-    (тип оборудования + степень критичности), объединяются в одно
-    сводное сообщение (alert grouping). Оповещения уровня critical
-    доставляются немедленно, без ожидания агрегации.
+  1. События инцидента «закрыт» и «нет инцидента», а также критичность
+     «норма» оповещений не порождают. Критичность не пересчитывается —
+     берётся та, что вернул детектор инцидентов (app/incidents.py).
+  2. Порог оповещения из настроек инспектора: вероятность ниже порога
+     (по умолчанию t*) оповещения не порождает.
+  3. Если в настройках не включён ни один канал, оповещения не
+     формируются и в журнал не попадают.
+  4. Подавление повторов. Открытие инцидента окно подавления игнорирует;
+     продолжение инцидента оповещает не чаще окна для своей критичности
+     (critical — самое короткое). Окно считается ПО АГРЕГАТУ, а не по
+     инциденту: от времени события (метки предсказания) последней
+     успешной отправки по этому агрегату. Время последней отправки
+     читается из журнала оповещений (в том числе для агрегатов в составе
+     сводного письма), поэтому окно переживает рестарт. Неудачная
+     доставка отправкой не считается и окно не включает.
+  5. Групповая агрегация. Прошедшие оповещения копятся по ключу «тип
+     оборудования + критичность» и по истечении окна агрегации
+     объединяются в одно сводное письмо; critical доставляется
+     немедленно. Окно агрегации считается по «часам» — зависимости,
+     которую приложение передаёт настоящей (UTC), а тест — управляемой.
 
-Поддерживаются два транспорта доставки, выбираемые переменной
-SPA_SMTP_MODE: smtp (внешний SMTP-сервер с TLS) и file (сохранение
-писем в виде .eml-файлов в каталоге data/alerts для отладки и
-демонстрации).
+Письма формируются в формате multipart/alternative (текстовая и HTML-
+версии, app/email_render.py); в HTML-версию встраивается inline-график
+динамики (через Content-ID), а сам график прикладывается к письму
+отдельным файлом. Доставка идёт по каналам, включённым в настройках
+(почта, SMS, push); настройки читаются при каждом решении и при
+доставке. Транспорты (почта, SMS, push) передаются сервису извне.
+Почтовых транспорта два, выбор — переменной SPA_SMTP_MODE: smtp
+(внешний SMTP-сервер с TLS) и file (сохранение писем в виде .eml-файлов
+в каталоге data/alerts для отладки и демонстрации). SMS и push —
+демонстрационные заглушки, фиксирующие доставку в журнале.
+
+В журнале оповещений (alerts_log) одна запись соответствует одной
+попытке доставки по каналу. Состав сводного оповещения хранится в
+alert_members: по записи на агрегат группы с его инцидентом и временем
+события.
 """
 from __future__ import annotations
 
@@ -43,16 +63,24 @@ from typing import Callable, Optional
 from . import charts, email_render
 from .config import settings
 from .db_base import DatabaseProtocol
+from .incidents import IncidentEvent, IncidentResult
 from .notification_settings import default_notification_settings, load_notification_settings
 from .schema import PredictionRecord
 from .severity import (
     Severity,
-    classify,
     cooldown_minutes,
     group_window_seconds,
 )
 
 log = logging.getLogger(__name__)
+
+# «Часы» — источник текущего времени (UTC, с часовым поясом).
+Clock = Callable[[], datetime]
+
+
+def utc_now() -> datetime:
+    """Часы приложения: системное время UTC."""
+    return datetime.now(timezone.utc)
 
 _ACTIONS_BASE = [
     "Произвести визуальный осмотр единицы оборудования.",
@@ -236,16 +264,16 @@ class NotificationService:
     """
 
     def __init__(self, db: DatabaseProtocol, transport, sender: str, recipient: str,
-                 mode: str) -> None:
+                 mode: str, clock: Clock = utc_now, sms_transport=None,
+                 push_transport=None) -> None:
         self.db = db
         self.transport = transport
         self.sender = sender
         self.recipient = recipient
         self.mode = mode
-        self.sms_transport = SmsStubTransport()
-        self.push_transport = PushStubTransport()
-        self._last_sent: dict[str, datetime] = {}
-        self._lock = threading.RLock()
+        self.clock = clock
+        self.sms_transport = sms_transport or SmsStubTransport()
+        self.push_transport = push_transport or PushStubTransport()
         self.grouper = AlertGrouper(deliver=self._deliver_group)
 
     # ----- Активные каналы и порог оповещения из настроек -----
@@ -281,9 +309,8 @@ class NotificationService:
 
     # ----- Подавление повторов -----
     def _last_sent_time(self, machine_id: str) -> Optional[datetime]:
-        last = self._last_sent.get(machine_id)
-        if last is not None:
-            return last
+        """Время события последней успешной отправки по агрегату — из
+        журнала оповещений (единственный источник, переживает рестарт)."""
         row = self.db.last_alert_for_machine(machine_id)
         if row is None:
             return None
@@ -305,17 +332,19 @@ class NotificationService:
         return (now - last) < window
 
     # ----- Приём оповещения и группировка -----
-    def notify(self, prediction: PredictionRecord, machine_type: str,
-               incident_id: Optional[int], force: bool = False) -> Optional[int]:
-        """Принимает оповещение, применяет подавление повторов и
-        передаёт его группировщику. Возвращает идентификатор записи
-        alerts_log при немедленной доставке либо None при подавлении
-        или помещении в группу до истечения окна агрегации."""
-        severity = classify(prediction.failure_probability,
-                            prediction.remaining_useful_life_days,
-                            prediction.threshold)
+    def handle(self, prediction: PredictionRecord, machine_type: str,
+               outcome: IncidentResult) -> Optional[int]:
+        """Принимает исход детектора инцидентов для живого предсказания и
+        применяет политику оповещений (см. docstring модуля). Возвращает
+        идентификатор записи alerts_log при немедленной доставке либо
+        None при отказе от оповещения, подавлении или помещении в группу
+        до истечения окна агрегации."""
+        if outcome.event not in (IncidentEvent.OPENED, IncidentEvent.UPDATED):
+            return None
+        severity = outcome.severity
         if not severity.is_alerting():
             return None
+        incident_id = outcome.incident_id
 
         # Порог оповещения может быть повышен инспектором в настройках
         # профиля: при значении выше t* модели уведомления формируются
@@ -329,7 +358,8 @@ class NotificationService:
             return None
 
         event_time = prediction.timestamp
-        if not force and self._is_within_cooldown(
+        # Открытие инцидента окно подавления игнорирует, продолжение — нет.
+        if outcome.event is IncidentEvent.UPDATED and self._is_within_cooldown(
                 prediction.machine_id, severity, event_time):
             log.info("Оповещение по %s подавлено (severity=%s, окно %d мин)",
                      prediction.machine_id, severity.value,
@@ -340,14 +370,15 @@ class NotificationService:
             prediction=prediction, machine_type=machine_type,
             incident_id=incident_id, severity=severity, event_time=event_time,
         )
-        now_wall = datetime.now(timezone.utc)
+        now = self.clock()
         window = group_window_seconds(severity)
-        produced = self.grouper.submit(item, window, now_wall)
-        self.grouper.flush_due(now_wall)
+        produced = self.grouper.submit(item, window, now)
+        self.grouper.flush_due(now)
         return produced[0] if produced else None
 
-    def flush_due(self, now: Optional[datetime] = None) -> list[int]:
-        return self.grouper.flush_due(now or datetime.now(timezone.utc))
+    def flush_due(self) -> list[int]:
+        """Доставляет группы, у которых истекло окно агрегации по часам."""
+        return self.grouper.flush_due(self.clock())
 
     def flush_all(self) -> list[int]:
         return self.grouper.flush_all()
@@ -428,13 +459,23 @@ class NotificationService:
             attach_name=f"group_{machine_type}_{severity.value}.png",
             chart_cid="spa-group", severity=severity,
         )
-        representative = machines[0]["machine_id"]
+        # Состав письма пишется в журнал по записи на агрегат: у каждого
+        # свой инцидент и своё время события (от него идёт окно подавления).
+        by_machine: dict[str, AlertItem] = {}
         for it in items:
-            self._last_sent[it.prediction.machine_id] = it.event_time
+            known = by_machine.get(it.prediction.machine_id)
+            if known is None or it.event_time >= known.event_time:
+                by_machine[it.prediction.machine_id] = it
+        members = [{
+            "machine_id": mid, "incident_id": it.incident_id,
+            "event_time": it.event_time,
+        } for mid, it in sorted(by_machine.items())]
+        representative = machines[0]["machine_id"]
         return self._dispatch(
-            msg, machine_id=representative, incident_id=None,
+            msg, machine_id=representative,
+            incident_id=by_machine[representative].incident_id,
             severity=severity, group_key=key, grouped_count=len(items),
-            event_time=items[0].event_time, update_last_sent=False,
+            event_time=by_machine[representative].event_time, members=members,
         )
 
     # ----- Формирование MIME-сообщения и фиксация в журнале -----
@@ -460,15 +501,15 @@ class NotificationService:
     def _dispatch(self, msg: EmailMessage, machine_id: str,
                   incident_id: Optional[int], severity: Severity,
                   group_key: str, grouped_count: int, event_time: datetime,
-                  update_last_sent: bool = True) -> Optional[int]:
+                  members: Optional[list[dict]] = None) -> Optional[int]:
         """Доставляет оповещение по всем каналам, включённым в настройках
         профиля (почта, SMS, push), и фиксирует результат каждой попытки
-        в журнале оповещений. Возвращает идентификатор первой успешной
-        записи либо None, если ни один канал не доставил сообщение."""
+        в журнале оповещений (у сводного — вместе с составом группы).
+        Возвращает идентификатор первой успешной записи либо None, если
+        ни один канал не доставил сообщение."""
         cfg = self._channel_config()
         subject = str(msg["Subject"])
         plain = self._plain_of(msg)
-        delivered = False
         primary_id: Optional[int] = None
 
         def _record(channel: str, recipient: str, status: str,
@@ -478,7 +519,7 @@ class NotificationService:
                 sent_at=event_time, recipient=recipient or "—",
                 subject=subject, body=plain, channel=channel, status=status,
                 severity=severity.value, group_key=group_key,
-                grouped_count=grouped_count, error=error,
+                grouped_count=grouped_count, error=error, members=members,
             )
 
         # Канал «почта»: доставка multipart-сообщения штатным транспортом.
@@ -491,7 +532,6 @@ class NotificationService:
             try:
                 self.transport.send(msg)
                 primary_id = _record(self.mode, recipient, "sent")
-                delivered = True
             except Exception as exc:
                 log.exception("Ошибка доставки оповещения (почта) по %s", machine_id)
                 _record(self.mode, recipient, "failed", str(exc))
@@ -503,7 +543,6 @@ class NotificationService:
                 self.sms_transport.send(recipient, subject, plain)
                 aid = _record("sms", recipient, "sent")
                 primary_id = primary_id or aid
-                delivered = True
             except Exception as exc:
                 log.exception("Ошибка доставки оповещения (SMS) по %s", machine_id)
                 _record("sms", recipient, "failed", str(exc))
@@ -515,13 +554,10 @@ class NotificationService:
                 self.push_transport.send(recipient, subject, plain)
                 aid = _record("push", recipient, "sent")
                 primary_id = primary_id or aid
-                delivered = True
             except Exception as exc:
                 log.exception("Ошибка доставки оповещения (push) по %s", machine_id)
                 _record("push", recipient, "failed", str(exc))
 
-        if delivered and update_last_sent:
-            self._last_sent[machine_id] = event_time
         return primary_id
 
     @staticmethod

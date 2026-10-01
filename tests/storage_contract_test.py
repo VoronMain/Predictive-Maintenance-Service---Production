@@ -70,7 +70,8 @@ def _make_postgres(request, tmp_path):
     with instance._transaction() as conn, conn.cursor() as cur:
         cur.execute(
             "TRUNCATE equipment, telemetry_raw, telemetry_hourly, predictions, "
-            "alert_thresholds, incidents_log, alerts_log, notification_settings "
+            "alert_thresholds, incidents_log, alerts_log, alert_members, "
+            "notification_settings "
             "RESTART IDENTITY CASCADE"
         )
     return instance
@@ -554,7 +555,7 @@ def test_alert_insert_and_get_by_id(db):
         "sent_at": "2026-01-01T12:00:00+00:00", "recipient": "ops@example.local",
         "subject": "Тема", "body": "Тело письма", "channel": "email",
         "severity": "high", "group_key": "g1", "grouped_count": 3,
-        "status": "sent", "error": None,
+        "status": "sent", "error": None, "members": [],
     }
 
 
@@ -585,7 +586,7 @@ def test_alert_list_newest_first_without_body_and_with_limit(db):
     assert "body" not in rows[0]
     assert set(rows[0]) == {"id", "incident_id", "machine_id", "sent_at", "recipient",
                             "subject", "channel", "severity", "group_key",
-                            "grouped_count", "status", "error"}
+                            "grouped_count", "status", "error", "members"}
 
 
 def test_alerts_count_includes_only_sent(db):
@@ -669,3 +670,46 @@ def test_notification_settings_saved_values_win_over_defaults(db):
 
     assert result["email"] == "ops@example.local"
     assert result["failure_threshold"] == 0.42
+
+
+def test_group_alert_members_are_returned_with_incidents(db):
+    _equipment(db, "M-1")
+    _equipment(db, "M-2")
+    inc1 = db.open_incident("M-1", T0, 0.5, 12.0, 0.33)
+    inc2 = db.open_incident("M-2", T0, 0.5, 12.0, 0.33)
+
+    alert_id = _alert(db, T0, incident_id=inc1, group_key="g1", grouped_count=2,
+                      members=[
+                          {"machine_id": "M-2", "incident_id": inc2, "event_time": T0},
+                          {"machine_id": "M-1", "incident_id": inc1, "event_time": T0},
+                      ])
+
+    expected = [{"machine_id": "M-1", "incident_id": inc1},
+                {"machine_id": "M-2", "incident_id": inc2}]
+    assert db.get_alert(alert_id)["members"] == expected
+    assert db.list_alerts()[0]["members"] == expected
+
+
+def test_last_alert_for_machine_sees_group_members_by_their_event_time(db):
+    _equipment(db, "M-1")
+    _equipment(db, "M-2")
+    inc2 = db.open_incident("M-2", T0, 0.5, 12.0, 0.33)
+    member_time = T0 + timedelta(minutes=7)
+
+    _alert(db, T0, machine_id="M-1", members=[
+        {"machine_id": "M-1", "incident_id": None, "event_time": T0},
+        {"machine_id": "M-2", "incident_id": inc2, "event_time": member_time},
+    ])
+
+    row = db.last_alert_for_machine("M-2")
+    assert row["sent_at"] == "2026-01-01T12:07:00+00:00"
+    assert row["incident_id"] == inc2
+
+
+def test_failed_group_alert_members_do_not_count_as_sent(db):
+    _equipment(db, "M-1")
+    _equipment(db, "M-2")
+    _alert(db, T0, machine_id="M-1", status="failed", members=[
+        {"machine_id": "M-2", "incident_id": None, "event_time": T0}])
+
+    assert db.last_alert_for_machine("M-2") is None
