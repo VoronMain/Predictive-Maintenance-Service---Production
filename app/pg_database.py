@@ -9,8 +9,8 @@ SQLite (модуль app/database.py), и предназначен для зам
 
 Расширение TimescaleDB подключается отдельным охраняемым шагом
 инициализации (_setup_timescaledb_extension) и не является обязательным:
-на управляемом PostgreSQL без этого расширения (например, Railway HOBBY,
-где собственный образ timescale/timescaledb уходит в краш-луп по OOM)
+на управляемом PostgreSQL без этого расширения (например, managed-PostgreSQL,
+где собственный образ timescale/timescaledb недоступен)
 бэкенд деградирует до обычных таблиц PostgreSQL, не теряя работоспособность.
 Доступность расширения отражена флагом self.timescaledb_available.
 
@@ -60,7 +60,7 @@ _DEFAULT_SEVERITY = "medium"
 # Определение реляционной схемы. Расширение TimescaleDB (если доступно)
 # подключается отдельным охраняемым шагом в _setup_timescaledb_extension —
 # логическая схема таблиц от его наличия не зависит: на обычном PostgreSQL
-# (например, managed-Postgres на Railway HOBBY, где собственный образ
+# (например, managed-Postgres, где собственный образ
 # timescale/timescaledb недоступен) telemetry_raw, telemetry_hourly и
 # predictions остаются обычными таблицами.
 SCHEMA_DDL = """
@@ -196,7 +196,7 @@ class PostgresDatabase:
     def _setup_timescaledb_extension(self) -> None:
         """Охраняемый шаг: пытается подключить расширение TimescaleDB.
 
-        На управляемом PostgreSQL без TimescaleDB (например, Railway HOBBY)
+        На управляемом PostgreSQL без TimescaleDB (например, managed-PostgreSQL)
         команда CREATE EXTENSION завершится ошибкой доступа/отсутствия
         расширения в системном каталоге — это ожидаемая ситуация, а не
         авария. В этом случае схема инициализации продолжает работу на

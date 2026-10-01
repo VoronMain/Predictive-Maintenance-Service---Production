@@ -1,0 +1,31 @@
+# Blueprint Render: один веб-сервис из Dockerfile (HTTP-сервис и эмулятор
+# телеметрии поднимает лончер start.py). Значения секретов в репозитории не
+# хранятся: переменные с `sync: false` Render запрашивает при создании
+# Blueprint и дальше хранит в дашборде.
+services:
+  - type: web
+    name: predictive-maintenance-service
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: SPA_DB_BACKEND
+        value: postgres
+      - key: SPA_REQUIRE_STRONG_AUTH
+        value: "true"
+      # Подключение к PostgreSQL (managed-база Render или любая другая).
+      - key: SPA_PG_HOST
+        sync: false
+      - key: SPA_PG_PORT
+        value: "5432"
+      - key: SPA_PG_DB
+        sync: false
+      - key: SPA_PG_USER
+        sync: false
+      - key: SPA_PG_PASSWORD
+        sync: false
+      # HTTP Basic: учётные данные выдаёт автор проекта.
+      - key: SPA_BASIC_AUTH_USER
+        sync: false
+      - key: SPA_BASIC_AUTH_PASSWORD
+        sync: false
