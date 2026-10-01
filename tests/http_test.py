@@ -38,7 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.forge_machines import FORGE_MACHINES  # noqa: E402
 from app.main import app  # noqa: E402
-from app.trajectory import measure, noise_source  # noqa: E402
+from app.trajectory import measure, noise_source, to_ingest_payload  # noqa: E402
 
 AUTH = (settings.BASIC_AUTH_USER, settings.BASIC_AUTH_PASSWORD)
 BAD_AUTH = ("wrong-user", "wrong-password")
@@ -49,11 +49,9 @@ _KNOWN_MACHINE = FORGE_MACHINES[0]
 def _ingest_payload() -> dict:
     """Валидное измерение для известного агрегата из module траектории —
     в том же JSON-формате, что отправляет emulator/forge_stream.py."""
-    m = measure(_KNOWN_MACHINE, 1.0, datetime.now(timezone.utc),
-                noise_source(_KNOWN_MACHINE))
-    payload = m.model_dump()
-    payload["timestamp"] = m.timestamp.isoformat()
-    return payload
+    return to_ingest_payload(
+        measure(_KNOWN_MACHINE, 1.0, datetime.now(timezone.utc),
+                noise_source(_KNOWN_MACHINE)))
 
 
 # --------------------------------------------------------------- #

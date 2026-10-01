@@ -186,3 +186,10 @@ def measure(machine: ForgeMachine, t: float, at: datetime,
         coolant_flow_l_min=None,
         heat_index=None,
     )
+
+
+def to_ingest_payload(measurement: TelemetryMeasurement) -> dict:
+    """Измерение в JSON-словарь формата /ingest (timestamp — ISO 8601)."""
+    payload = measurement.model_dump()
+    payload["timestamp"] = measurement.timestamp.isoformat()
+    return payload

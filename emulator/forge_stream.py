@@ -37,7 +37,7 @@ from app.forge_machines import (  # noqa: E402
     FORGE_MACHINES,
     SEED_HISTORY_DAYS,
 )
-from app.trajectory import measure, noise_source  # noqa: E402
+from app.trajectory import measure, noise_source, to_ingest_payload  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,11 +56,8 @@ def _handle_stop(signum, frame):
 
 def _payload(machine, rng: random.Random, t: float) -> dict:
     """Измерение из module траектории в JSON формата /ingest."""
-    now = datetime.now(timezone.utc)
-    m = measure(machine, t, now, rng)
-    payload = m.model_dump()
-    payload["timestamp"] = m.timestamp.isoformat()
-    return payload
+    return to_ingest_payload(
+        measure(machine, t, datetime.now(timezone.utc), rng))
 
 
 def wait_for_server(url: str, timeout: int) -> bool:
