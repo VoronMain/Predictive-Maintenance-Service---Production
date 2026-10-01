@@ -393,7 +393,8 @@ class SQLiteDatabase:
                 "SELECT 1 FROM telemetry_hourly WHERE machine_id = ? AND window_end = ?)",
                 [
                     (h.machine_id, _utc_iso(h.window_end),
-                     json.dumps(_clean_features(h.features), ensure_ascii=False),
+                     json.dumps(_clean_features(h.features), ensure_ascii=False,
+                                default=float),
                      h.machine_id, _utc_iso(h.window_end))
                     for h in hourly_aggregates
                 ],
