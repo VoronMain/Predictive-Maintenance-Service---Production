@@ -1,5 +1,10 @@
 # СПА — система предиктивной аналитики промышленного оборудования (production)
 
+[![CI](https://github.com/VoronMain/Predictive-Maintenance-Service---Production/actions/workflows/ci.yml/badge.svg)](https://github.com/VoronMain/Predictive-Maintenance-Service---Production/actions/workflows/ci.yml)
+[![Лицензия: MIT](https://img.shields.io/github/license/VoronMain/Predictive-Maintenance-Service---Production)](LICENSE)
+![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
+
 Монолитное веб-приложение на FastAPI: мониторинг технического состояния
 30 агрегатов кузнечно-прессового цеха. Принимает поток телеметрии, прогоняет
 через ML-модель (LightGBM — вероятность отказа, CatBoost — остаточный ресурс),
@@ -7,6 +12,47 @@
 
 Это **production-сборка**: только то, что уезжает в облако. Разработка,
 документация, тесты и обучение моделей ведутся отдельно.
+
+![Мониторинг цеха: агрегаты по убыванию вероятности отказа](docs/img/overview.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/machine.png" alt="Карточка агрегата: вероятность отказа, остаточный ресурс, датчики"></td>
+    <td width="50%"><img src="docs/img/incidents.png" alt="Электронный журнал отказов"></td>
+  </tr>
+  <tr>
+    <td align="center">Карточка агрегата</td>
+    <td align="center">Журнал отказов</td>
+  </tr>
+</table>
+
+## Как это работает
+
+```mermaid
+flowchart LR
+    E["Эмулятор телеметрии<br/>forge_stream.py"] -->|POST /ingest| V["Валидация"]
+    V --> W["Окно признаков<br/>feature_window.py"]
+    W --> M["ML-инференс<br/>LightGBM + CatBoost"]
+    M --> D[("Хранилище<br/>PostgreSQL / SQLite")]
+    M --> I["Журнал отказов<br/>incidents.py"]
+    I --> N["Оповещения<br/>notifications.py"]
+    D --> U["Веб-интерфейс<br/>FastAPI + static/"]
+    I --> U
+```
+
+Конвейер (`app/pipeline.py`) проходит шаги: приём измерений, валидация, окно
+признаков, инференс, сохранение, детектирование инцидентов и оповещения.
+
+## Стек
+
+| Область | Технологии |
+|---------|------------|
+| Сервер | Python 3.13, FastAPI, Uvicorn, Pydantic |
+| ML | LightGBM (вероятность отказа), CatBoost (остаточный ресурс), scikit-learn, pandas, NumPy |
+| Хранилище | PostgreSQL (psycopg 3), SQLite как резервный бэкенд |
+| Интерфейс | HTML, CSS и JavaScript без сборки, Chart.js для графиков |
+| Тесты и CI | pytest, testcontainers, GitHub Actions |
+| Развёртывание | Docker, Render (Blueprint `render.yaml`) |
 
 ## Состав
 
