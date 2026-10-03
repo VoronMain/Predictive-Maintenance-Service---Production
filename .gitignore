@@ -39,3 +39,6 @@ Thumbs.db
 *.csv
 !app/**/*.csv
 predictive_maintenance/models/balanced_random_forest.joblib
+
+# Claude Code
+CLAUDE.md
